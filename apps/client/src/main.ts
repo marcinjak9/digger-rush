@@ -4,12 +4,14 @@ import { Keyboard } from './input.js';
 import { loadNickname, sanitizeNickname, saveNickname } from './nickname.js';
 import { Renderer } from './renderer.js';
 import { LocalSession, type GameSession } from './session.js';
+import { NetSession } from './net/NetSession.js';
 import { Ui } from './ui.js';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const uiRoot = document.getElementById('ui') as HTMLElement;
 
-function showStart(onPlay: (name: string) => void): void {
+// `onPlay` resolves with an error message to show on the start screen, or null when the game started.
+function showStart(onPlay: (name: string) => Promise<string | null>): void {
   const box = document.createElement('div');
   box.id = 'start';
   box.innerHTML = `<h1>DIGGER RUSH</h1>
@@ -21,18 +23,33 @@ function showStart(onPlay: (name: string) => void): void {
   const err = box.querySelector('#starterr') as HTMLElement;
   input.value = loadNickname();
   input.focus();
+  const button = box.querySelector('button') as HTMLButtonElement;
+  let busy = false;
   box.querySelector('form')?.addEventListener('submit', (e) => {
     e.preventDefault();
+    if (busy) return;
     const r = sanitizeNickname(input.value);
     if (!r.ok) { err.textContent = r.error; return; }
     saveNickname(r.name);
-    box.remove();
-    onPlay(r.name);
+    busy = true;
+    button.disabled = true;
+    err.style.color = '#cfe8ff';
+    err.textContent = 'Connecting...';
+    void onPlay(r.name).then((error) => {
+      busy = false;
+      button.disabled = false;
+      if (error === null) { box.remove(); return; }
+      err.style.color = '';
+      err.textContent = error;
+    });
   });
 }
 
-function startGame(nickname: string): void {
-  const session: GameSession = new LocalSession(nickname);
+function startGame(session: GameSession): void {
+  const statusEl = document.createElement('div');
+  statusEl.id = 'netstatus';
+  statusEl.className = 'hidden';
+  document.body.appendChild(statusEl);
   const ui = new Ui(uiRoot, {
     onBuy: (kind) => { session.buy(kind); },
     onToggleShop: () => ui.setShop(!ui.shopOpen),
@@ -63,13 +80,30 @@ function startGame(nickname: string): void {
     boardTimer += dt;
     if (boardTimer >= 1) {
       boardTimer = 0;
-      const st = session.player.stats;
-      ui.setLeaderboard([{ name: session.nickname, score: Math.max(st.score, st.highScore), me: true }], 1, session);
+      const b = session.getBoard();
+      ui.setLeaderboard(b.rows, b.rank, session);
     }
+    const bad = session.status === 'reconnecting' || session.status === 'lost';
+    statusEl.classList.toggle('hidden', !bad);
+    if (bad && statusEl.textContent !== session.statusText) statusEl.textContent = session.statusText;
     ui.update(session, fps, renderer.stats);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
 }
 
-showStart(startGame);
+const LOCAL = new URLSearchParams(location.search).get('local') === '1';
+
+showStart(async (name) => {
+  if (LOCAL) {
+    startGame(new LocalSession(name));
+    return null;
+  }
+  try {
+    startGame(await NetSession.connect(name));
+    return null;
+  } catch (e) {
+    const msg = e instanceof Error && e.message !== '' ? e.message : 'Could not reach the server.';
+    return /fetch|network|ECONN|failed|closed|WebSocket/i.test(msg) ? 'Could not reach the server. Is it running? (add ?local=1 to play offline)' : msg;
+  }
+});

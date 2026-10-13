@@ -10,3 +10,6 @@ export * from './radar.js';
 export * from './pod.js';
 export * from './sand.js';
 export * from './sim.js';
+export * from './nickname.js';
+export * from './net.js';
+export * from './predict.js';

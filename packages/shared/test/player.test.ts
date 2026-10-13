@@ -167,9 +167,12 @@ describe('respawn', () => {
       const sand = new SandSim();
       const pl = createPlayer(1, newPlayer(), w, 5);
       const out: number[] = [];
-      for (let t = 1; t <= 8; t++) {
+      let t = 0;
+      for (let i = 0; i < 8; i++) {
         pl.stats.hull = 0;
-        simTick(w, sand, [pl], new Map(), t);
+        simTick(w, sand, [pl], new Map(), ++t);
+        expect(pl.deadTicks).toBeGreaterThan(0);
+        while (pl.deadTicks > 0) simTick(w, sand, [pl], new Map(), ++t);
         out.push(pl.pod.x);
       }
       return out;
@@ -242,7 +245,14 @@ describe('death', () => {
     const ev = simTick(w, sand, [pl], new Map(), 1);
     expect(ev.deaths).toEqual([3]);
     expect(pl.stats.highScore).toBe(77);
+    expect(pl.finalScore).toBe(77);
     expect(pl.stats.hull).toBe(100);
+    expect(pl.deadTicks).toBe(T.respawnTicks - 1); // the death tick already counted down once
+    for (let t = 2; t < T.respawnTicks; t++) simTick(w, sand, [pl], new Map(), t);
+    expect(pl.deadTicks).toBe(1);
+    const ev2 = simTick(w, sand, [pl], new Map(), T.respawnTicks);
+    expect(ev2.respawns).toEqual([3]);
+    expect(pl.invulnTicks).toBe(T.invulnTicks);
     expect(Number.isInteger(pl.pod.y + T.podHalf)).toBe(true);
     expect(w.get(Math.floor(pl.pod.x), pl.pod.y + T.podHalf)).not.toBe(Tile.EMPTY);
   });

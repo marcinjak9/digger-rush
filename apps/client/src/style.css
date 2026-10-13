@@ -39,3 +39,7 @@ button:disabled { background: #555; color: #999; cursor: default; }
 #radarfill { position: absolute; left: 0; top: 0; height: 100%; width: 100%; background: linear-gradient(#5be0ff, #1a8fb5); }
 .radar.cooling #radarfill { background: linear-gradient(#6b7b82, #3d484d); }
 .radar span { position: relative; letter-spacing: 1px; }
+
+#netstatus { position: fixed; top: 0; left: 0; right: 0; padding: 10px; text-align: center; background: rgba(200, 40, 40, 0.9); color: #fff; font-weight: bold; z-index: 50; pointer-events: none; }
+#netstatus.hidden { display: none; }
+#start button:disabled { opacity: 0.6; }

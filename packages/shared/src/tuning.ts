@@ -133,4 +133,34 @@ export const T = {
   spawnXMax: 94,
   spawnScanRows: 40, // rows scanned from the top for the first solid tile
   spawnSalt: 90,
+
+  respawnTicks: 180, // 3 s dead before the pod comes back
+  invulnTicks: 180, // 3 s without damage after respawning
+
+  // Networking (server authoritative, shared by server, client and bots)
+  net: {
+    serverHz: 30, // server loop rate
+    simTicksPerServerTick: 2, // 60 Hz sim ticks each server tick grants per player
+    snapEveryTicks: 1, // a snapshot every N server ticks
+    burstTicks: 8, // cap on a player's saved-up tick allowance
+    inputQueueMax: 40, // queued commands per player; overflow is dropped
+    maxCmdTicks: 4, // ticks a single command may cover
+    clientSendEveryTicks: 2, // client flushes input about every N local ticks
+    clientMaxPendingTicks: 30, // client stops predicting when this many ticks are unacked
+    maxClients: 30, // per room
+    interestChunkRadius: 2, // chunks around the pod's chunk that a player is subscribed to
+    podInterestTiles: 30, // other pods within this many tiles (each axis) are sent
+    interpDelayMs: 100, // remote pods are drawn this far in the past
+    snapBufferLen: 8,
+    reconnectWindowMs: 60000,
+    reconnectRetryMs: 1500,
+    roomIdleMs: 600000, // an empty room is disposed after this long
+    evictEveryTicks: 300, // far unmodified chunk eviction cadence (server ticks)
+    leaderboardEveryTicks: 30,
+    pingEveryMs: 2000,
+    maxBuyPerSec: 10,
+    maxRadarPerSec: 4,
+    maxPingPerSec: 5,
+    maxViolations: 200, // invalid messages before a client is dropped
+  },
 } as const;

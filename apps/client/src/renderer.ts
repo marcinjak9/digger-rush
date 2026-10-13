@@ -111,6 +111,17 @@ const RADAR_MAX = 512;
 
 const CRACK_A = [0.3, 1.4, 2.5, 3.6, 4.7, 5.6, 0.9, 3.0];
 
+interface PodDraw {
+  faceRight: boolean;
+  faceDown: boolean;
+  drilling: boolean;
+  thrust: boolean;
+  invuln: boolean;
+  nick: string;
+  body: string;
+  nickColor: string;
+}
+
 export interface DebugStats {
   tilesPerSec: number;
   chunksLoaded: number;
@@ -347,7 +358,7 @@ export class Renderer {
     ctx.globalCompositeOperation = 'source-over';
 
     // sand blocks from sim state
-    const blocks = s.sand.blocks;
+    const blocks = s.sandBlocks;
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i];
       if (b.falling) {
@@ -384,8 +395,30 @@ export class Renderer {
       }
     }
 
+    // other players: only inside the light radius around the local pod
+    const rem = s.remotes;
+    if (rem.length > 0) {
+      const lr = lightRadius(iy < 0 ? 0 : iy);
+      for (let i = 0; i < rem.length; i++) {
+        const r = rem[i];
+        if (r.dead) continue;
+        const ddx = r.x - ix;
+        const ddy = r.y - iy;
+        if (ddx * ddx + ddy * ddy > lr * lr) continue;
+        this.drawPodAt(ctx, r.x * TS, r.y * TS, {
+          faceRight: r.faceRight, faceDown: r.faceDown, drilling: r.drilling, thrust: r.thrusting, invuln: r.invuln,
+          nick: r.nick, body: r.color, nickColor: r.color,
+        });
+      }
+    }
+
     // pod
-    if (!s.dead) this.drawPod(ctx, ix * TS, iy * TS, input);
+    if (!s.dead) {
+      this.drawPodAt(ctx, ix * TS, iy * TS, {
+        faceRight: pod.fy !== 0 || pod.fx >= 0, faceDown: pod.fy !== 0, drilling: pod.drill !== null || pod.glide !== null,
+        thrust: input.up, invuln: s.invulnerable, nick: s.nickname, body: '#f08a24', nickColor: '#fff',
+      });
+    }
 
     // particles + floating text
     for (let i = 0; i < pcount; i++) {
@@ -495,13 +528,10 @@ export class Renderer {
     ctx.globalCompositeOperation = 'source-over';
   }
 
-  private drawPod(ctx: CanvasRenderingContext2D, cx: number, cy: number, input: PodInput): void {
-    const s = this.s;
-    const pod = s.player.pod;
-    if (s.invulnerable && Math.floor(this.time * 10) % 2 === 0) ctx.globalAlpha = 0.35;
-    const fx = pod.fx;
-    const fy = pod.fy;
-    const drilling = pod.drill !== null || pod.glide !== null;
+  private drawPodAt(ctx: CanvasRenderingContext2D, cx: number, cy: number, o: PodDraw): void {
+    if (o.invuln && Math.floor(this.time * 10) % 2 === 0) ctx.globalAlpha = 0.35;
+    const drilling = o.drilling;
+    const input = { up: o.thrust };
 
     // thrust flame
     if (input.up && !drilling) {
@@ -523,8 +553,8 @@ export class Renderer {
 
     // drill bit
     const jitter = drilling ? (Math.floor(this.time * 40) % 2) * 2 - 1 : 0;
-    const dxn = fy !== 0 ? 0 : fx >= 0 ? 1 : -1;
-    const dyn = fy !== 0 ? 1 : 0;
+    const dxn = o.faceDown ? 0 : o.faceRight ? 1 : -1;
+    const dyn = o.faceDown ? 1 : 0;
     const bx = cx + dxn * HALF;
     const by = cy + dyn * HALF;
     ctx.fillStyle = '#9aa0a8';
@@ -544,7 +574,7 @@ export class Renderer {
     ctx.stroke();
 
     // body
-    ctx.fillStyle = '#f08a24';
+    ctx.fillStyle = o.body;
     ctx.fillRect(cx - HALF, cy - HALF, HALF * 2, HALF * 2);
     ctx.strokeStyle = '#8a4a0c';
     ctx.lineWidth = 3;
@@ -565,8 +595,8 @@ export class Renderer {
     ctx.textAlign = 'center';
     ctx.lineWidth = 3;
     ctx.strokeStyle = 'rgba(0,0,0,0.75)';
-    ctx.strokeText(s.nickname, cx, cy - HALF - 12);
-    ctx.fillStyle = '#fff';
-    ctx.fillText(s.nickname, cx, cy - HALF - 12);
+    ctx.strokeText(o.nick, cx, cy - HALF - 12);
+    ctx.fillStyle = o.nickColor;
+    ctx.fillText(o.nick, cx, cy - HALF - 12);
   }
 }

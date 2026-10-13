@@ -13,7 +13,7 @@ export interface InputCmd extends PodInput {
 }
 
 export const NO_INPUT: PodInput = { left: false, right: false, up: false, down: false };
-export const MAX_CMD_TICKS = 4;
+export const MAX_CMD_TICKS = T.net.maxCmdTicks;
 
 export function packInput(i: PodInput): number {
   return (i.left ? 1 : 0) | (i.right ? 2 : 0) | (i.up ? 4 : 0) | (i.down ? 8 : 0);
@@ -34,3 +34,10 @@ export function isNewerSeq(seq: number, last: number): boolean {
 }
 
 export const INPUT_HZ = T.TICK_HZ;
+
+// Shared immutable inputs per mask, so hot paths never allocate.
+const INPUT_TABLE: readonly PodInput[] = Array.from({ length: 16 }, (_, m) => Object.freeze(unpackInput(m)));
+
+export function inputFromMask(mask: number): PodInput {
+  return INPUT_TABLE[mask & 15];
+}

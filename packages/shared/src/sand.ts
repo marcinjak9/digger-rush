@@ -12,6 +12,7 @@ export type SandEvent =
   | { kind: 'wobble'; tick: number; x: number; y: number }
   | { kind: 'fall'; tick: number; x: number; y: number }
   | { kind: 'land'; tick: number; x: number; y: number }
+  | { kind: 'calm'; tick: number; x: number; y: number } // a wobble was cancelled (support returned or tile removed)
   | { kind: 'hit'; tick: number; x: number; y: number; podId: number; damage: number };
 
 export interface SandBlock {
@@ -79,9 +80,9 @@ export class SandSim {
   }
 
   private updateWobble(world: World, b: SandBlock, tick: number, events: SandEvent[]): boolean {
-    if (!TILES[world.get(b.x, b.y)].falls) return true; // dug out from under the wobble
+    if (!TILES[world.get(b.x, b.y)].falls) { events.push({ kind: 'calm', tick, x: b.x, y: b.y }); return true; } // dug out from under the wobble
     const below = world.get(b.x, b.y + 1);
-    if (below !== Tile.EMPTY && !(TILES[below].falls && this.wobbling.has(wobbleKey(b.x, b.y + 1)))) return true; // support is back
+    if (below !== Tile.EMPTY && !(TILES[below].falls && this.wobbling.has(wobbleKey(b.x, b.y + 1)))) { events.push({ kind: 'calm', tick, x: b.x, y: b.y }); return true; } // support is back
     b.t++;
     if (b.t >= b.delay) {
       b.aux = world.getAux(b.x, b.y);

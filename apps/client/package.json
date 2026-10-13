@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@digger/shared": "*"
+    "@digger/shared": "*",
+    "colyseus.js": "0.16.22"
   },
   "devDependencies": {
     "vite": "^5.4.0"

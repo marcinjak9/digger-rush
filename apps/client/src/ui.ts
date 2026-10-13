@@ -193,7 +193,11 @@ export class Ui {
         `chunks loaded ${dbg.chunksLoaded} (canvases ${dbg.chunkCanvases})\n` +
         `pod ${p.x.toFixed(3)}, ${p.y.toFixed(3)}  v ${p.vx.toFixed(2)}, ${p.vy.toFixed(2)}\n` +
         `state ${state}  facing ${p.fx},${p.fy}  in-tile ${aim}\n` +
-        `sand blocks ${s.sand.blocks.length}  invuln ${s.invulnerable}\n` +
+        `sand blocks ${s.sandBlocks.length}  invuln ${s.invulnerable}\n` +
+        (s.net !== null
+          ? `ping ${s.net.pingMs} ms   players in room ${s.net.players}   others in range ${s.remotes.length}\n` +
+            `snaps/s ${s.net.snapsPerSec.toFixed(1)}   unacked ticks ${s.net.pendingTicks}   last correction ${s.net.correction.toFixed(3)} tiles\n`
+          : '') +
         `hash ${dbg.podHash.toString(16)}`);
       const rec = T as unknown as Record<string, number>;
       for (const [k, el] of this.tuneVals) setText(el, ' ' + rec[k] + ' ');

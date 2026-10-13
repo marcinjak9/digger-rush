@@ -1,5 +1,5 @@
 import {
-  T, Tile, World, SandSim, simTick, createPlayer, newPlayer, buyUpgrade, tryRadar, maxHpOf, NO_INPUT,
+  T, World, SandSim, simTick, createPlayer, newPlayer, buyUpgrade, tryRadar, NO_INPUT,
   type PodInput, type SimPlayer, type SimDug, type SandEvent, type TileChange, type UpgradeKind, type BuyResult,
 } from '@digger/shared';
 
@@ -14,11 +14,54 @@ export interface FrameFx {
   respawned: boolean;
 }
 
-// Everything the renderer / UI needs from a running game. WP3 supplies a networked
-// implementation (prediction + reconciliation) behind the same interface.
+// What the renderer needs to draw one sand block (a SandSim block, or a client side animation).
+export interface SandView {
+  x: number;
+  y: number;
+  tile: number;
+  t: number; // wobble ticks elapsed
+  falling: boolean;
+  acc: number; // tenths of a tick toward the next cell while falling
+}
+
+// Another player's pod, interpolated for drawing.
+export interface RemoteView {
+  id: number;
+  nick: string;
+  color: string;
+  x: number;
+  y: number;
+  faceRight: boolean;
+  faceDown: boolean;
+  drilling: boolean;
+  thrusting: boolean;
+  dead: boolean;
+  invuln: boolean;
+  hull: number; // 0..1
+}
+
+export interface BoardData {
+  rows: Array<{ name: string; score: number; me: boolean }>;
+  rank: number;
+  count: number;
+}
+
+export interface NetDebug {
+  pingMs: number;
+  players: number;
+  correction: number; // last reconcile error in tiles
+  pendingTicks: number;
+  snapsPerSec: number;
+}
+
+export type ConnectionStatus = 'local' | 'ok' | 'reconnecting' | 'lost';
+
+// Everything the renderer / UI needs from a running game. LocalSession runs the sim in the browser;
+// NetSession (net/) predicts against a server and reconciles.
 export interface GameSession {
   readonly world: World;
-  readonly sand: SandSim;
+  readonly sandBlocks: readonly SandView[];
+  readonly remotes: readonly RemoteView[];
   readonly player: SimPlayer;
   readonly nickname: string;
   readonly fx: FrameFx;
@@ -30,19 +73,19 @@ export interface GameSession {
   readonly finalScore: number;
   readonly tick: number;
   readonly latencyLabel: string;
+  readonly status: ConnectionStatus;
+  readonly statusText: string;
+  readonly net: NetDebug | null;
   /** Advances real time; steps the fixed-rate sim zero or more times. */
   advance(dtSec: number, input: PodInput): void;
   /** Number of radar pulses fired so far; the renderer reacts when it changes. */
   readonly radarPings: number;
   buy(kind: UpgradeKind): BuyResult | 'dead';
   useRadar(): 'ok' | 'cooldown' | 'dead';
+  getBoard(): BoardData;
 }
 
-export const RESPAWN_TICKS = 3 * T.TICK_HZ;
-export const INVULN_TICKS = 3 * T.TICK_HZ;
 const MAX_STEPS_PER_FRAME = 6;
-const NO_PODS: SimPlayer[] = [];
-const NO_INPUTS: ReadonlyMap<number, PodInput> = new Map();
 
 export class LocalSession implements GameSession {
   readonly world = new World(T.SEED);
@@ -54,13 +97,13 @@ export class LocalSession implements GameSession {
   };
   readonly prev = { x: 0, y: 0 };
   readonly latencyLabel = 'local';
-  dead = false;
-  finalScore = 0;
+  readonly remotes: readonly RemoteView[] = [];
+  readonly status: ConnectionStatus = 'local';
+  readonly statusText = '';
+  readonly net = null;
   tick = 0;
   radarPings = 0;
   private acc = 0;
-  private deadTicks = 0;
-  private invulnTicks = 0;
   private readonly inputs = new Map<number, PodInput>();
   private static readonly ID = 1;
 
@@ -71,14 +114,23 @@ export class LocalSession implements GameSession {
     this.prev.y = this.player.pod.y;
   }
 
+  get sandBlocks(): readonly SandView[] {
+    return this.sand.blocks;
+  }
+  get dead(): boolean {
+    return this.player.deadTicks > 0;
+  }
+  get finalScore(): number {
+    return this.player.finalScore;
+  }
   get alpha(): number {
     return this.acc * T.TICK_HZ;
   }
   get respawnLeftSec(): number {
-    return this.deadTicks / T.TICK_HZ;
+    return this.player.deadTicks / T.TICK_HZ;
   }
   get invulnerable(): boolean {
-    return this.invulnTicks > 0;
+    return this.player.invulnTicks > 0;
   }
 
   advance(dtSec: number, input: PodInput): void {
@@ -110,49 +162,24 @@ export class LocalSession implements GameSession {
     this.tick++;
     this.prev.x = pod.x;
     this.prev.y = pod.y;
-    if (this.dead) {
-      // The world (sand!) keeps simulating while the player is away.
-      const ev = simTick(this.world, this.sand, NO_PODS, NO_INPUTS, this.tick);
-      for (const e of ev.sand) fx.sand.push(e);
-      if (--this.deadTicks <= 0) {
-        this.dead = false;
-        this.invulnTicks = INVULN_TICKS;
-        this.prev.x = pod.x;
-        this.prev.y = pod.y;
-        fx.respawned = true;
-      }
-      return;
-    }
-    const st = pl.stats;
-    const scoreBefore = st.score;
-    const hullBefore = st.hull;
+    const wasDead = pl.deadTicks > 0;
+    const hullBefore = pl.stats.hull;
     const vyBefore = pod.vy;
-    const invuln = this.invulnTicks > 0;
-    if (invuln) {
-      this.invulnTicks--;
-      st.hull = 1e9; // damage can not kill while invulnerable
-    }
     this.inputs.set(pl.id, input);
     const ev = simTick(this.world, this.sand, [pl], this.inputs, this.tick);
     for (const d of ev.dug) fx.dug.push(d);
     for (const e of ev.sand) fx.sand.push(e);
-    if (ev.deaths.length > 0) {
-      this.dead = true;
-      this.deadTicks = RESPAWN_TICKS;
-      this.finalScore = scoreBefore;
-      this.invulnTicks = 0;
-      fx.died = true;
+    if (ev.respawns.length > 0) {
+      fx.respawned = true;
       this.prev.x = pod.x;
       this.prev.y = pod.y;
+    }
+    if (ev.deaths.length > 0) {
+      fx.died = true;
       return;
     }
-    if (invuln) {
-      // Undo the damage; keep heal pickups.
-      const healed = ev.dug.some((d) => d.tile === Tile.HEAL);
-      const max = maxHpOf(st.lvl);
-      st.hull = healed ? Math.min(max, hullBefore + max * T.healFrac) : hullBefore;
-    }
-    if (st.hull < hullBefore) fx.damage += hullBefore - st.hull;
+    if (wasDead) return;
+    if (pl.stats.hull < hullBefore) fx.damage += hullBefore - pl.stats.hull;
     if (vyBefore > 4 && pod.vy === 0 && pod.grounded) {
       if (vyBefore > T.hardLandSpeed) fx.hardLandVy = vyBefore;
       else fx.softLandVy = vyBefore;
@@ -169,6 +196,11 @@ export class LocalSession implements GameSession {
   buy(kind: UpgradeKind): BuyResult | 'dead' {
     if (this.dead) return 'dead';
     return buyUpgrade(this.player.stats, kind);
+  }
+
+  getBoard(): BoardData {
+    const st = this.player.stats;
+    return { rows: [{ name: this.nickname, score: Math.max(st.score, st.highScore), me: true }], rank: 1, count: 1 };
   }
 }
 

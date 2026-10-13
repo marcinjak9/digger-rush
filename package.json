@@ -2,16 +2,23 @@
   "name": "digger-rush",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "vitest run",
-    "dev": "npm run dev -w @digger/client",
-    "build": "npm run build -w @digger/client"
+    "dev": "concurrently -k -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm run dev -w @digger/server",
+    "dev:client": "npm run dev -w @digger/client",
+    "start:server": "npm run start -w @digger/server",
+    "build": "npm run build --workspaces --if-present"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.0",
+    "concurrently": "^9.0.0"
   }
 }

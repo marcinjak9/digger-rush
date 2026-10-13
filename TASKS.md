@@ -1,7 +1,7 @@
 # TASKS (resumable checklist)
 Branch: web-demo/initial. Commit after each work package; checks: `npm run typecheck && npm test`.
 
-- [ ] WP0 scout: NOTES.md
+- [x] WP0 scout: NOTES.md
 - [ ] WP1 ARCH plan (PLAN_WP1.md) + builder: shared package + tests
 - [ ] WP2 builder: client local mode  -> STOP and report
 - [ ] WP3 server + rooms + prediction

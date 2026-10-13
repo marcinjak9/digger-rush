@@ -1,13 +1,13 @@
-import { T, UPGRADE_KINDS, maxHpOf, TILES, type UpgradeKind } from '@digger/shared';
+import { T, UPGRADE_KINDS, maxHpOf, TILES, upgradeCost, radarCooldownTicksOf, type UpgradeKind } from '@digger/shared';
 import type { GameSession } from './session.js';
 import type { DebugStats } from './renderer.js';
 
 const LABELS: Record<UpgradeKind, [string, string]> = {
-  drill: ['Drill speed', `-${T.upgrade.drillPct}% dig time per level`],
+    drill: ['Drill speed', `-${Math.round((1 - T.upgrade.drillMult) * 100)}% dig time per level (compounding)`],
   maxHp: ['Max HP', `+${T.upgrade.hpPerLevel} HP per level`],
-  moveSpeed: ['Move speed', `+${T.upgrade.movePct}% per level`],
-  oreValue: ['Ore value', `+${T.upgrade.orePct}% per level`],
-  armor: ['Armor', `-${T.upgrade.armorPct}% damage per level`],
+  moveSpeed: ['Move speed', `+${T.upgrade.movePct}% per level (max x${T.upgrade.maxMoveMult})`],
+  armor: ['Armor', `-${Math.round((1 - T.upgrade.armorMult) * 100)}% damage per level (compounding)`],
+  radar: ['Radar cooldown', `-${Math.round((1 - T.upgrade.radarCdMult) * 100)}% per level (min ${T.radarMinCooldownSeconds}s)`],
 };
 
 // Constants that the shared sim reads live from T on every tick, so they can be tweaked at runtime.
@@ -25,6 +25,10 @@ const TUNEABLE: Array<{ key: string; step: number }> = [
 ];
 const DEFAULTS: Record<string, number> = {};
 for (const t of TUNEABLE) DEFAULTS[t.key] = (T as unknown as Record<string, number>)[t.key];
+
+function fmtMoney(n: number): string {
+  return n >= 1e9 ? '$' + n.toExponential(2) : '$' + n;
+}
 
 function setText(el: HTMLElement, s: string): void {
   if (el.textContent !== s) el.textContent = s;
@@ -55,6 +59,7 @@ export class Ui {
         <div class="hud-left">
           <div class="hpbar"><div id="hpfill"></div><span id="hptext"></span></div>
           <div class="stats"><span>Wallet <b id="wallet"></b></span><span>Score <b id="score"></b></span><span>Best <b id="high"></b></span><span>Depth <b id="depth"></b></span></div>
+        <div class="radar" id="radar"><div id="radarfill"></div><span id="radartext"></span></div>
         </div>
         <div class="hud-right"><span id="net">local</span> <span id="fps"></span> <button id="shopbtn">Shop (B)</button></div>
         <div id="board"><h4>Leaderboard</h4><ol id="boardlist"></ol><div id="boardme"></div></div>
@@ -67,7 +72,7 @@ export class Ui {
         <h1>You died</h1><div>Score <b id="dscore"></b></div><div>Best <b id="dhigh"></b></div>
         <div class="hint" id="drespawn"></div></div></div>
       <div id="debug" class="hidden"><pre id="dbgtext"></pre><div id="dbgtune"></div></div>`;
-    for (const id of ['hud', 'hpfill', 'hptext', 'wallet', 'score', 'high', 'depth', 'net', 'fps', 'shopbtn', 'board', 'boardlist', 'boardme',
+    for (const id of ['hud', 'hpfill', 'hptext', 'radar', 'radarfill', 'radartext', 'wallet', 'score', 'high', 'depth', 'net', 'fps', 'shopbtn', 'board', 'boardlist', 'boardme',
       'shop', 'shoprows', 'shopwallet', 'shopclose', 'death', 'dscore', 'dhigh', 'drespawn', 'debug', 'dbgtext', 'dbgtune']) {
       this.el[id] = root.querySelector('#' + id) as HTMLElement;
     }
@@ -157,12 +162,19 @@ export class Ui {
         const lv = st.lvl[kind];
         const r = this.shopRows.get(kind) as { lvl: HTMLElement; cost: HTMLElement };
         const b = this.buy.get(kind) as HTMLButtonElement;
-        const maxed = lv >= T.upgrade.maxLevel;
-        setText(r.lvl, `Lv ${lv}/${T.upgrade.maxLevel}`);
-        setText(r.cost, maxed ? 'MAX' : '$' + T.upgrade.cost[lv]);
-        b.disabled = maxed || s.dead || st.wallet < T.upgrade.cost[lv];
+        const capped = lv >= T.upgrade.levelCap;
+        const cost = upgradeCost(lv);
+        setText(r.lvl, `Lv ${lv}`);
+        setText(r.cost, capped ? 'MAX' : fmtMoney(cost));
+        b.disabled = capped || s.dead || st.wallet < cost;
       }
     }
+
+    const total = radarCooldownTicksOf(st.lvl.radar);
+    const ready = st.radarTicks <= 0;
+    this.el.radarfill.style.width = (ready ? 100 : (1 - st.radarTicks / total) * 100).toFixed(1) + '%';
+    this.el.radar.classList.toggle('cooling', !ready);
+    setText(this.el.radartext, ready ? 'SPACE  RADAR' : `SPACE  ${(st.radarTicks / T.TICK_HZ).toFixed(1)}s`);
 
     this.el.death.classList.toggle('hidden', !s.dead);
     if (s.dead) {

@@ -1,4 +1,4 @@
-import { T, Tile, TILES, boostedValue, podHash, type PodInput, type TileChange } from '@digger/shared';
+import { T, Tile, TILES, oreValueAt, scanOre, lightRadius, RADAR_STRIDE, podHash, type PodInput, type TileChange } from '@digger/shared';
 import type { FrameFx, GameSession } from './session.js';
 
 const TS = T.TILE_PX;
@@ -95,6 +95,20 @@ function floatText(x: number, y: number, text: string, color: string): void {
   ftx[i] = x; fty[i] = y; ftl[i] = 1.1; ftt[i] = text; ftc[i] = color;
 }
 
+// radar highlight colours by ore tile id
+const RADAR_RGB: Record<number, [number, number, number]> = {
+  [Tile.COPPER]: [235, 130, 50],
+  [Tile.GOLD]: [255, 217, 38],
+  [Tile.GEM]: [64, 235, 247],
+  [Tile.HEAL]: [62, 224, 106],
+};
+const RADAR_CSS: Record<number, string> = {};
+for (const k of Object.keys(RADAR_RGB)) {
+  const c = RADAR_RGB[Number(k)];
+  RADAR_CSS[Number(k)] = `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+const RADAR_MAX = 512;
+
 const CRACK_A = [0.3, 1.4, 2.5, 3.6, 4.7, 5.6, 0.9, 3.0];
 
 export interface DebugStats {
@@ -110,6 +124,15 @@ export class Renderer {
   private readonly lavaGlow = makeGlow(255, 110, 30);
   private readonly healGlow = makeGlow(70, 255, 120);
   private sky: CanvasGradient;
+  private readonly radarGlow: Record<number, HTMLCanvasElement> = {};
+  private readonly radarBuf = new Int32Array(RADAR_MAX * RADAR_STRIDE);
+  private radarCount = 0;
+  private radarX = 0;
+  private radarY = 0;
+  private radarStart = -1e9;
+  private radarSeen = 0;
+  private dark: CanvasGradient | null = null;
+  private darkKey = [0, 0, 0, 0];
   private scale = 1;
   private w = 1;
   private h = 1;
@@ -126,6 +149,11 @@ export class Renderer {
   constructor(private readonly canvas: HTMLCanvasElement, private readonly s: GameSession) {
     this.ctx = canvas.getContext('2d', { alpha: false }) as CanvasRenderingContext2D;
     this.sky = this.ctx.createLinearGradient(0, T.yMin * TS, 0, 0);
+    for (const k of Object.keys(RADAR_RGB)) {
+      const c = RADAR_RGB[Number(k)];
+      this.radarGlow[Number(k)] = makeGlow(c[0], c[1], c[2]);
+    }
+    this.radarSeen = s.radarPings;
     this.camX = s.player.pod.x;
     this.camY = s.player.pod.y;
     this.resize();
@@ -161,7 +189,7 @@ export class Renderer {
         burst(cx, cy, 14, '#6dff9a', 200, 0.8, 120);
       } else {
         const base = TILES[d.tile].value > 0 ? TILES[d.tile].value : TILES[d.aux].value;
-        if (base > 0) floatText(cx, cy - 10, '+$' + boostedValue(base, s.player.stats.lvl), '#ffe14d');
+        if (base > 0) floatText(cx, cy - 10, '+$' + oreValueAt(base, d.y), '#ffe14d');
       }
     }
     for (const e of fx.sand) {
@@ -177,8 +205,16 @@ export class Renderer {
     } else if (fx.softLandVy > 0) {
       burst(pod.x * TS, (pod.y + T.podHalf) * TS, 6, '#b09070', 90, 0.4, 30);
     }
+    if (s.radarPings !== this.radarSeen) {
+      this.radarSeen = s.radarPings;
+      this.radarCount = scanOre(s.world, Math.floor(pod.x), Math.floor(pod.y), T.radarRadius, this.radarBuf);
+      this.radarX = pod.x * TS;
+      this.radarY = pod.y * TS;
+      this.radarStart = this.time;
+    }
     if (fx.damage > 0) this.flash = Math.min(0.6, this.flash + 0.25);
     if (fx.died) {
+      this.radarStart = -1e9;
       this.shake = 14;
       this.flash = 0.6;
     }
@@ -363,6 +399,11 @@ export class Renderer {
       ctx.fillRect(px_[i], py_[i], psize[i], psize[i]);
     }
     ctx.globalAlpha = 1;
+
+    this.drawDarkness(ctx, ox + ix * TS * sc, oy + iy * TS * sc, iy);
+    ctx.setTransform(sc, 0, 0, sc, ox, oy);
+    this.drawRadar(ctx);
+
     ctx.font = 'bold 22px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.lineWidth = 4;
@@ -391,6 +432,67 @@ export class Renderer {
     st.chunksLoaded = world.chunks.size;
     st.chunkCanvases = this.chunks.size;
     st.podHash = podHash(pod);
+  }
+
+  // One radial-gradient fill over the whole screen: clear near the pod, ~96% dark outside.
+  // Screen space; the gradient is only rebuilt when its centre or radii change.
+  private drawDarkness(ctx: CanvasRenderingContext2D, cx: number, cy: number, row: number): void {
+    const L = T.light;
+    const rTiles = lightRadius(row < 0 ? 0 : row);
+    const px = TS * this.scale;
+    const rOut = rTiles * px;
+    const rIn = Math.max(0, (rTiles - L.edge) * px);
+    const far = Math.max(cx, this.w - cx) ** 2 + Math.max(cy, this.h - cy) ** 2;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (rIn * rIn > far) return; // light covers the whole screen
+    const k = this.darkKey;
+    if (this.dark === null || k[0] !== cx || k[1] !== cy || k[2] !== rIn || k[3] !== rOut) {
+      const g = ctx.createRadialGradient(cx, cy, rIn, cx, cy, rOut);
+      g.addColorStop(0, 'rgba(0,0,0,0)');
+      g.addColorStop(1, `rgba(0,0,0,${L.darkAlpha})`);
+      this.dark = g;
+      k[0] = cx; k[1] = cy; k[2] = rIn; k[3] = rOut;
+    }
+    ctx.fillStyle = this.dark;
+    ctx.fillRect(0, 0, this.w, this.h);
+  }
+
+  // Radar ring and ore highlights, drawn after the darkness so they show through it.
+  private drawRadar(ctx: CanvasRenderingContext2D): void {
+    const t = this.time - this.radarStart;
+    if (t < 0 || t > T.radarShowSeconds) return;
+    const R = T.radarRadius;
+    if (t < T.radarRingSeconds) {
+      const f = t / T.radarRingSeconds;
+      ctx.strokeStyle = `rgba(120,230,255,${(1 - f) * 0.9})`;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(this.radarX, this.radarY, f * R * TS, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    const fade = Math.min(1, (T.radarShowSeconds - t) / 0.6);
+    const pulse = 0.65 + 0.35 * Math.sin(this.time * 6);
+    const world = this.s.world;
+    const buf = this.radarBuf;
+    for (let i = 0; i < this.radarCount; i++) {
+      const x = buf[i * RADAR_STRIDE];
+      const y = buf[i * RADAR_STRIDE + 1];
+      const kind = buf[i * RADAR_STRIDE + 2];
+      const dx = (x + 0.5) * TS - this.radarX;
+      const dy = (y + 0.5) * TS - this.radarY;
+      if (t < (Math.sqrt(dx * dx + dy * dy) / (R * TS)) * T.radarRingSeconds) continue; // ring has not reached it yet
+      if (world.get(x, y) === Tile.EMPTY) continue; // already mined
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = fade * pulse * 0.8;
+      ctx.drawImage(this.radarGlow[kind], (x - 0.9) * TS, (y - 0.9) * TS, TS * 2.8, TS * 2.8);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = fade * (0.5 + 0.5 * pulse);
+      ctx.strokeStyle = RADAR_CSS[kind];
+      ctx.lineWidth = 3;
+      ctx.strokeRect(x * TS + 2, y * TS + 2, TS - 4, TS - 4);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
   }
 
   private drawPod(ctx: CanvasRenderingContext2D, cx: number, cy: number, input: PodInput): void {

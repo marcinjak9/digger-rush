@@ -1,16 +1,18 @@
 import { T } from './tuning.js';
 import { Tile } from './tiles.js';
 import { fmix32, u32 } from './hash.js';
+import { isSolid } from './tiles.js';
 import type { World } from './world.js';
 import { newPod, stepPod, type PodState } from './pod.js';
 import { NO_INPUT, type PodInput } from './input.js';
-import { applyDamage, die, isDead, onDug, type Player } from './player.js';
+import { applyDamage, die, isDead, onDug, stepRadarCooldown, type Player } from './player.js';
 import type { SandEvent, SandSim } from './sand.js';
 
 export interface SimPlayer {
   id: number;
   pod: PodState;
   stats: Player;
+  spawnSalt: number; // changes on every death; feeds the random respawn column
 }
 
 export interface SimDug {
@@ -27,21 +29,28 @@ export interface SimEvents {
   deaths: number[];
 }
 
-// Spawn column (tile centre) spread along the surface, away from the side walls.
-export function spawnX(id: number): number {
-  const span = T.WORLD_W - 2 * T.spawnMargin;
-  return T.spawnMargin + (u32(T.SEED, id | 0, 0, T.spawnSalt) % span) + 0.5;
+// Random respawn column (tile centre), deterministic from (seed, player id, spawn salt).
+export function spawnX(id: number, salt = 0, seed: number = T.SEED): number {
+  const span = T.spawnXMax - T.spawnXMin + 1;
+  return T.spawnXMin + (u32(seed, id | 0, salt | 0, T.spawnSalt) % span) + 0.5;
 }
 
-// Pod standing on top of surface row 0 (rows y < 0 are sky).
-export function spawnPod(id: number): PodState {
-  const p = newPod(spawnX(id), -T.podHalf);
+// Row of the first solid tile scanning down from the top of the column (0 when none is found).
+export function surfaceRow(world: World, col: number): number {
+  for (let y = 0; y < T.spawnScanRows; y++) if (isSolid(world.get(col, y))) return y;
+  return 0;
+}
+
+// Pod resting on the first solid tile of a hashed column.
+export function spawnPod(world: World, id: number, salt = 0): PodState {
+  const x = spawnX(id, salt, world.seed);
+  const p = newPod(x, surfaceRow(world, Math.floor(x)) - T.podHalf);
   p.grounded = true;
   return p;
 }
 
-export function createPlayer(id: number, stats: Player): SimPlayer {
-  return { id, pod: spawnPod(id), stats };
+export function createPlayer(id: number, stats: Player, world: World, spawnSalt = 0): SimPlayer {
+  return { id, pod: spawnPod(world, id, spawnSalt), stats, spawnSalt };
 }
 
 // The one ordering used everywhere (server, client prediction, offline).
@@ -61,9 +70,10 @@ export function simTick(
     if (ev.dug !== null) {
       const d = ev.dug;
       world.set(d.x, d.y, Tile.EMPTY);
-      onDug(pl.stats, d.tile, d.aux);
+      onDug(pl.stats, d.tile, d.aux, d.y);
       out.dug.push({ id: pl.id, x: d.x, y: d.y, tile: d.tile, aux: d.aux });
     }
+    stepRadarCooldown(pl.stats);
     if (ev.landDamage > 0) applyDamage(pl.stats, ev.landDamage);
     if (ev.lavaTicks > 0) applyDamage(pl.stats, T.lavaDps / T.TICK_HZ);
   }
@@ -77,7 +87,8 @@ export function simTick(
   for (const pl of order) {
     if (!isDead(pl.stats)) continue;
     die(pl.stats);
-    pl.pod = spawnPod(pl.id);
+    pl.spawnSalt = (pl.spawnSalt + 1) | 0;
+    pl.pod = spawnPod(world, pl.id, pl.spawnSalt);
     out.deaths.push(pl.id);
   }
   return out;

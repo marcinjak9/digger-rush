@@ -144,7 +144,7 @@ describe('physics', () => {
     const w = dirtWorld();
     carve(w, 10, 5, 10, 40, Tile.LAVA);
     const sand = new SandSim();
-    const pl = createPlayer(1, newPlayer());
+    const pl = createPlayer(1, newPlayer(), w);
     pl.pod = newPod(10.5, 6);
     const none = new Map<number, PodInput>();
     for (let t = 1; t <= 60; t++) simTick(w, sand, [pl], none, t);
@@ -152,7 +152,7 @@ describe('physics', () => {
     pl.stats.lvl.armor = 2;
     pl.stats.hull = 100;
     for (let t = 61; t <= 120; t++) simTick(w, sand, [pl], none, t);
-    expect(pl.stats.hull).toBeCloseTo(100 - 25 * 0.8, 6);
+    expect(pl.stats.hull).toBeCloseTo(100 - 25 * 0.81, 6);
   });
 
   it('clamps height and keeps pod inside the side walls', () => {
@@ -177,19 +177,20 @@ describe('physics', () => {
     }
   });
 
-  it('spawn helper spreads players along the surface and rests on the ground', () => {
+  it('spawn helper puts the pod on a solid tile of a random column', () => {
     const xs = new Set<number>();
     for (let id = 0; id < 20; id++) {
       const x = spawnX(id);
-      expect(x).toBeGreaterThan(3);
-      expect(x).toBeLessThan(93);
+      expect(x).toBeGreaterThan(1);
+      expect(x).toBeLessThan(95);
       xs.add(x);
     }
     expect(xs.size).toBeGreaterThan(10);
     const w = new World(1337);
-    const pod = spawnPod(4);
+    const pod = spawnPod(w, 4, 2);
+    const y0 = pod.y;
     for (let i = 0; i < 30; i++) stepPod(pod, NONE, w, L0);
-    expect(pod.y).toBe(-T.podHalf);
+    expect(pod.y).toBe(y0);
     expect(pod.grounded).toBe(true);
   });
 });
@@ -207,7 +208,7 @@ function scriptedInput(t: number): PodInput {
 function runScript(): { hash: number; changes: string; hull: number; wallet: number; y: number } {
   const w = new World(1337);
   const sand = new SandSim();
-  const pl = createPlayer(2, newPlayer());
+  const pl = createPlayer(2, newPlayer(), w);
   for (let t = 1; t <= 600; t++) simTick(w, sand, [pl], new Map([[2, scriptedInput(t)]]), t);
   return { hash: podHash(pl.pod), changes: JSON.stringify(w.changes), hull: pl.stats.hull, wallet: pl.stats.wallet, y: pl.pod.y };
 }

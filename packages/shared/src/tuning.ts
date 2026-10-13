@@ -58,17 +58,39 @@ export const T = {
   digMs: [0, 280, 1100, 200, 350, 500, 800, 0, 0, 400],
   value: [0, 0, 0, 0, 8, 120, 400, 0, 0, 0],
 
-  // Upgrades
+  // Upgrades: endless. Level L (0-based = current level) costs floor(costBase * costMult^L),
+  // computed iteratively (no pow). Levels are clamped to levelCap (200) for table lookups and
+  // purchases: 50 * 1.6^200 is about 5e41, still a finite double, and no one gets near it.
   upgrade: {
-    maxLevel: 5,
-    cost: [50, 80, 128, 204, 327], // floor(50 * 1.6^level)
+    levelCap: 200,
     costBase: 50,
     costMult: 1.6,
-    drillPct: 10, // dig time -10% per level
+    drillMult: 0.9, // dig time multiplier per level (0.9^level), still floored by minDigTicks
     hpPerLevel: 20,
-    movePct: 8,
-    orePct: 10,
-    armorPct: 10,
+    movePct: 8, // +8% of base speed per level
+    maxMoveMult: 2.5, // hard cap on the move speed multiplier so physics stays safe
+    armorMult: 0.9, // damage multiplier per level (0.9^level, never reaches 0)
+    radarCdMult: 0.9, // radar cooldown multiplier per level
+  },
+
+  // Ore value scales with depth: floor(base * (1 + oreDepthBonus * row)). 1% per tile.
+  oreDepthBonus: 0.01,
+
+  // Radar (Space)
+  radarRadius: 12, // tiles
+  radarShowSeconds: 4,
+  radarRingSeconds: 0.6, // expanding ring animation (client only)
+  radarCooldownSeconds: 10, // base, times upgrade.radarCdMult^level
+  radarMinCooldownSeconds: 1,
+
+  // Light (client rendering only). Radius in tiles around the pod, by depth row.
+  light: {
+    nearRow: 8, // radius is nearRadius at or above this row
+    nearRadius: 14,
+    farRow: 200, // and farRadius at or below this row, linear in between
+    farRadius: 3,
+    darkAlpha: 0.96,
+    edge: 1.5, // soft edge width in tiles
   },
 
   // Generation (from the prototype)
@@ -107,6 +129,8 @@ export const T = {
     salt: { sandCell: 1, sandFill: 2, sandOre: 3, roll: 4, air: 5, heal: 7 },
   },
 
-  spawnMargin: 3,
+  spawnXMin: 1, // random respawn column range (inclusive tile columns)
+  spawnXMax: 94,
+  spawnScanRows: 40, // rows scanned from the top for the first solid tile
   spawnSalt: 90,
 } as const;

@@ -3,7 +3,7 @@ import type { PodInput } from '@digger/shared';
 const MAP: Record<string, keyof PodInput> = {
   KeyA: 'left', ArrowLeft: 'left',
   KeyD: 'right', ArrowRight: 'right',
-  KeyW: 'up', ArrowUp: 'up', Space: 'up',
+  KeyW: 'up', ArrowUp: 'up',
   KeyS: 'down', ArrowDown: 'down',
 };
 
@@ -12,6 +12,7 @@ export interface KeyActions {
   closeShop(): void;
   toggleDebug(): void;
   buyIndex(i: number): void;
+  radar(): void;
 }
 
 export class Keyboard {
@@ -38,6 +39,7 @@ export class Keyboard {
       return;
     }
     if (e.repeat) return;
+    if (e.code === 'Space') { e.preventDefault(); this.actions.radar(); return; }
     if (e.code === 'KeyB') this.actions.toggleShop();
     else if (e.code === 'Escape') this.actions.closeShop();
     else if (e.code === 'F3') { e.preventDefault(); this.actions.toggleDebug(); }

@@ -1,5 +1,5 @@
 import {
-  T, Tile, World, SandSim, simTick, createPlayer, newPlayer, buyUpgrade, maxHpOf, NO_INPUT,
+  T, Tile, World, SandSim, simTick, createPlayer, newPlayer, buyUpgrade, tryRadar, maxHpOf, NO_INPUT,
   type PodInput, type SimPlayer, type SimDug, type SandEvent, type TileChange, type UpgradeKind, type BuyResult,
 } from '@digger/shared';
 
@@ -32,7 +32,10 @@ export interface GameSession {
   readonly latencyLabel: string;
   /** Advances real time; steps the fixed-rate sim zero or more times. */
   advance(dtSec: number, input: PodInput): void;
+  /** Number of radar pulses fired so far; the renderer reacts when it changes. */
+  readonly radarPings: number;
   buy(kind: UpgradeKind): BuyResult | 'dead';
+  useRadar(): 'ok' | 'cooldown' | 'dead';
 }
 
 export const RESPAWN_TICKS = 3 * T.TICK_HZ;
@@ -54,15 +57,16 @@ export class LocalSession implements GameSession {
   dead = false;
   finalScore = 0;
   tick = 0;
+  radarPings = 0;
   private acc = 0;
   private deadTicks = 0;
   private invulnTicks = 0;
   private readonly inputs = new Map<number, PodInput>();
   private static readonly ID = 1;
 
-  constructor(nickname: string) {
+  constructor(nickname: string, spawnSalt = (Date.now() & 0x3fffffff)) {
     this.nickname = nickname;
-    this.player = createPlayer(LocalSession.ID, newPlayer(0));
+    this.player = createPlayer(LocalSession.ID, newPlayer(0), this.world, spawnSalt);
     this.prev.x = this.player.pod.x;
     this.prev.y = this.player.pod.y;
   }
@@ -153,6 +157,13 @@ export class LocalSession implements GameSession {
       if (vyBefore > T.hardLandSpeed) fx.hardLandVy = vyBefore;
       else fx.softLandVy = vyBefore;
     }
+  }
+
+  useRadar(): 'ok' | 'cooldown' | 'dead' {
+    if (this.dead) return 'dead';
+    const r = tryRadar(this.player.stats);
+    if (r === 'ok') this.radarPings++;
+    return r;
   }
 
   buy(kind: UpgradeKind): BuyResult | 'dead' {

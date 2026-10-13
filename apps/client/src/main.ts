@@ -15,7 +15,7 @@ function showStart(onPlay: (name: string) => void): void {
   box.innerHTML = `<h1>DIGGER RUSH</h1>
     <form><input id="nick" maxlength="40" autocomplete="off" placeholder="Nickname (2-16 chars)" /><button type="submit">Play</button></form>
     <div id="starterr"></div>
-    <div class="keys">A/D move + side drill &middot; S drill down &middot; W thrust &middot; B shop &middot; F3 debug</div>`;
+    <div class="keys">A/D move + side drill &middot; S drill down &middot; W thrust &middot; SPACE radar &middot; B shop &middot; F3 debug</div>`;
   document.body.appendChild(box);
   const input = box.querySelector('#nick') as HTMLInputElement;
   const err = box.querySelector('#starterr') as HTMLElement;
@@ -42,6 +42,7 @@ function startGame(nickname: string): void {
     toggleShop: () => ui.setShop(!ui.shopOpen),
     closeShop: () => ui.setShop(false),
     toggleDebug: () => ui.setDebug(!ui.debugOpen),
+    radar: () => { session.useRadar(); },
     buyIndex: (i) => { if (ui.shopOpen && i >= 0 && i < UPGRADE_KINDS.length) session.buy(UPGRADE_KINDS[i]); },
   });
   ui.show(true);

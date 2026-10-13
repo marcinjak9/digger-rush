@@ -1,4 +1,5 @@
 import { T } from './tuning.js';
+import { drillPpmOf } from './upgrades.js';
 
 export enum Tile {
   EMPTY = 0,
@@ -59,11 +60,11 @@ export function isOre(t: number): boolean {
 }
 
 // Dig time in whole ticks, in exact integer arithmetic:
-// ms * (100 + 2*row)% * (100 - 10*lvl)% * 60 ticks/s, rounded up, never below the floor.
+// ms * (100 + 2*row)% * drill multiplier (millionths, 0.9^lvl) * 60 ticks/s, rounded up, never below the floor.
 export function digTicks(tile: number, row: number, drillLvl: number): number {
   const ms = TILES[tile].digMs;
   const r = row < 0 ? 0 : row;
-  const num = ms * (100 + T.digRowPct * r) * (100 - T.upgrade.drillPct * drillLvl) * T.TICK_HZ;
-  const t = Math.ceil(num / 10000000);
+  const num = ms * (100 + T.digRowPct * r) * drillPpmOf(drillLvl) * T.TICK_HZ;
+  const t = Math.ceil(num / 100000000000);
   return t < T.minDigTicks ? T.minDigTicks : t;
 }

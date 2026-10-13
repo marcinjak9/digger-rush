@@ -1,33 +1,44 @@
 import { describe, expect, it } from 'vitest';
 import {
-  T, Tile, UPGRADE_KINDS, applyDamage, boostedValue, buyUpgrade, createPlayer, die, maxHpOf, newPlayer, onDug,
-  simTick, SandSim, World, u32, digTicks, moveSpeedOf, type Player,
+  T, Tile, UPGRADE_KINDS, applyDamage, buyUpgrade, createPlayer, die, maxHpOf, newPlayer, onDug, oreValueAt,
+  simTick, SandSim, World, u32, digTicks, moveSpeedOf, upgradeCost, tryRadar, stepRadarCooldown,
+  radarCooldownTicksOf, armorMultOf, scanOre, lightRadius, spawnX, spawnPod, type Player,
 } from '../src/index.js';
 
 describe('shop', () => {
-  it('cost table equals floor(50 * 1.6^level)', () => {
-    for (let l = 0; l < T.upgrade.maxLevel; l++) {
-      expect(T.upgrade.cost[l]).toBe(Math.floor(T.upgrade.costBase * T.upgrade.costMult ** l));
+  it('cost equals floor(50 * 1.6^level), endless, finite at the cap', () => {
+    let c = 50;
+    for (let l = 0; l < 60; l++) {
+      expect(upgradeCost(l)).toBe(Math.floor(c + 1e-6));
+      c *= 1.6;
     }
+    expect([0, 1, 2, 3, 4].map((l) => upgradeCost(l))).toEqual([50, 80, 128, 204, 327]);
+    expect(Number.isFinite(upgradeCost(T.upgrade.levelCap))).toBe(true);
+    expect(upgradeCost(100000)).toBe(upgradeCost(T.upgrade.levelCap));
+    expect(upgradeCost(11)).toBeGreaterThan(upgradeCost(10));
   });
 
-  it('refuses when funds are short and at max level; deducts exactly the cost', () => {
+  it('there are exactly 5 upgrades and no ore value upgrade', () => {
+    expect([...UPGRADE_KINDS]).toEqual(['drill', 'maxHp', 'moveSpeed', 'armor', 'radar']);
+  });
+
+  it('refuses when funds are short; deducts exactly the cost; no cap at level 5', () => {
     const p = newPlayer();
     expect(buyUpgrade(p, 'drill')).toBe('funds');
     p.wallet = 49;
     expect(buyUpgrade(p, 'drill')).toBe('funds');
-    p.wallet = 1000;
+    p.wallet = 1e9;
     p.score = 123;
-    for (let l = 0; l < 5; l++) {
+    for (let l = 0; l < 12; l++) {
       const before = p.wallet;
       expect(buyUpgrade(p, 'armor')).toBe('ok');
-      expect(p.wallet).toBe(before - T.upgrade.cost[l]);
+      expect(p.wallet).toBe(before - upgradeCost(l));
       expect(p.lvl.armor).toBe(l + 1);
     }
-    p.wallet = 100000;
-    expect(buyUpgrade(p, 'armor')).toBe('max');
-    expect(p.wallet).toBe(100000);
     expect(p.score).toBe(123);
+    p.lvl.armor = T.upgrade.levelCap;
+    p.wallet = Infinity;
+    expect(buyUpgrade(p, 'armor')).toBe('max');
   });
 
   it('upgrade effects', () => {
@@ -36,17 +47,19 @@ describe('shop', () => {
     expect(maxHpOf(p.lvl)).toBe(200);
     p.lvl.moveSpeed = 5;
     expect(moveSpeedOf(p.lvl)).toBeCloseTo(5.6, 10);
-    p.lvl.oreValue = 3;
-    expect(boostedValue(8, p.lvl)).toBe(10);
-    expect(boostedValue(400, p.lvl)).toBe(520);
+    p.lvl.moveSpeed = 1000;
+    expect(moveSpeedOf(p.lvl)).toBeCloseTo(T.moveSpeed * T.upgrade.maxMoveMult, 10);
     p.lvl.armor = 3;
     p.hull = 200;
     applyDamage(p, 100);
-    expect(p.hull).toBeCloseTo(130, 10);
+    expect(p.hull).toBeCloseTo(200 - 72.9, 10);
+    p.lvl.armor = T.upgrade.levelCap;
+    expect(armorMultOf(p.lvl.armor)).toBeGreaterThan(0);
     expect(digTicks(Tile.DIRT, 0, 0)).toBe(17);
     expect(digTicks(Tile.ROCK, 0, 0)).toBe(66);
-    expect(digTicks(Tile.ROCK, 0, 5)).toBe(33);
+    expect(digTicks(Tile.ROCK, 0, 5)).toBe(39); // 66 * 0.59049 = 38.97
     expect(digTicks(Tile.DIRT, 0, 5)).toBe(T.minDigTicks);
+    expect(digTicks(Tile.ROCK, 0, 10000)).toBe(T.minDigTicks);
     expect(digTicks(Tile.DIRT, 100, 0)).toBe(Math.ceil((280 * 300 * 60) / 100000));
   });
 
@@ -58,31 +71,143 @@ describe('shop', () => {
   });
 });
 
+describe('radar', () => {
+  it('cooldown: 10 s base, x0.9 per level, floored at 1 s', () => {
+    expect(radarCooldownTicksOf(0)).toBe(600);
+    expect(radarCooldownTicksOf(1)).toBe(540);
+    expect(radarCooldownTicksOf(T.upgrade.levelCap)).toBe(60);
+    for (let l = 1; l < 100; l++) expect(radarCooldownTicksOf(l)).toBeLessThanOrEqual(radarCooldownTicksOf(l - 1));
+  });
+
+  it('tryRadar starts the cooldown, which ticks down in sim ticks and resets on death', () => {
+    const w = new World(1337);
+    const pl = createPlayer(1, newPlayer(), w);
+    expect(tryRadar(pl.stats)).toBe('ok');
+    expect(pl.stats.radarTicks).toBe(600);
+    expect(tryRadar(pl.stats)).toBe('cooldown');
+    const sand = new SandSim();
+    for (let t = 1; t <= 599; t++) simTick(w, sand, [pl], new Map(), t);
+    expect(pl.stats.radarTicks).toBe(1);
+    expect(tryRadar(pl.stats)).toBe('cooldown');
+    stepRadarCooldown(pl.stats);
+    expect(tryRadar(pl.stats)).toBe('ok');
+    pl.stats.lvl.radar = 3;
+    pl.stats.radarTicks = 0;
+    tryRadar(pl.stats);
+    expect(pl.stats.radarTicks).toBe(radarCooldownTicksOf(3));
+    die(pl.stats);
+    expect(pl.stats.radarTicks).toBe(0);
+    expect(pl.stats.lvl.radar).toBe(0);
+  });
+
+  it('scanOre finds ore, heal and sand-hidden ore within the radius, into a reused buffer', () => {
+    const w = new World(1337);
+    for (let y = 0; y < 30; y++) for (let x = 0; x < 30; x++) w.set(x, y, Tile.DIRT);
+    w.set(10, 10, Tile.GOLD);
+    w.set(14, 10, Tile.HEAL);
+    w.set(10, 15, Tile.SAND, Tile.GEM);
+    w.set(11, 11, Tile.SAND, 0);
+    w.set(10, 25, Tile.COPPER); // out of range
+    w.set(20, 20, Tile.GEM); // out of range
+    const buf = new Int32Array(3 * 64);
+    const n = scanOre(w, 10, 10, T.radarRadius, buf);
+    const found = new Map<string, number>();
+    for (let i = 0; i < n; i++) found.set(buf[i * 3] + ',' + buf[i * 3 + 1], buf[i * 3 + 2]);
+    expect(found.get('10,10')).toBe(Tile.GOLD);
+    expect(found.get('14,10')).toBe(Tile.HEAL);
+    expect(found.get('10,15')).toBe(Tile.GEM);
+    expect(found.has('11,11')).toBe(false);
+    expect(found.has('10,25')).toBe(false);
+    expect(found.has('20,20')).toBe(false);
+    const tiny = new Int32Array(3);
+    expect(scanOre(w, 10, 10, T.radarRadius, tiny)).toBe(1);
+  });
+});
+
+describe('light radius', () => {
+  it('14 tiles near the surface, linear to 3 tiles at row 200, never smaller', () => {
+    expect(lightRadius(-5)).toBe(14);
+    expect(lightRadius(8)).toBe(14);
+    expect(lightRadius(200)).toBe(3);
+    expect(lightRadius(5000)).toBe(3);
+    expect(lightRadius(104)).toBeCloseTo(8.5, 10);
+    let prev = 99;
+    for (let r = 0; r < 400; r++) {
+      const v = lightRadius(r);
+      expect(v).toBeLessThanOrEqual(prev);
+      expect(v).toBeGreaterThanOrEqual(3);
+      prev = v;
+    }
+  });
+});
+
+describe('respawn', () => {
+  it('always rests on a solid tile, in range, and different salts give different x', () => {
+    const w = new World(1337);
+    const xs = new Set<number>();
+    for (let salt = 0; salt < 300; salt++) {
+      const x = spawnX(7, salt);
+      expect(x).toBeGreaterThanOrEqual(T.spawnXMin + 0.5);
+      expect(x).toBeLessThanOrEqual(T.spawnXMax + 0.5);
+      xs.add(x);
+      const pod = spawnPod(w, 7, salt);
+      const col = Math.floor(pod.x);
+      const row = Math.round(pod.y + T.podHalf);
+      expect(w.get(col, row)).not.toBe(Tile.EMPTY);
+      expect(w.get(col, row)).not.toBe(Tile.LAVA);
+      for (let y = 0; y < row; y++) expect(w.get(col, y)).toBe(Tile.EMPTY);
+      expect(pod.grounded).toBe(true);
+    }
+    expect(xs.size).toBeGreaterThan(60);
+  });
+
+  it('each death in simTick picks a new deterministic column', () => {
+    const run = (): number[] => {
+      const w = new World(1337);
+      const sand = new SandSim();
+      const pl = createPlayer(1, newPlayer(), w, 5);
+      const out: number[] = [];
+      for (let t = 1; t <= 8; t++) {
+        pl.stats.hull = 0;
+        simTick(w, sand, [pl], new Map(), t);
+        out.push(pl.pod.x);
+      }
+      return out;
+    };
+    const a = run();
+    expect(a).toEqual(run());
+    expect(new Set(a).size).toBeGreaterThan(5);
+  });
+});
+
 describe('mining and heal', () => {
-  it('mining ore adds the boosted value to wallet and score', () => {
+  it('ore value scales 1% per tile of depth, for wallet and score', () => {
+    expect(oreValueAt(120, 0)).toBe(120);
+    expect(oreValueAt(120, 50)).toBe(180);
+    expect(oreValueAt(8, 7)).toBe(8); // floor(8.56)
+    expect(oreValueAt(400, 7)).toBe(428);
     const p = newPlayer();
-    onDug(p, Tile.GOLD, 0);
+    onDug(p, Tile.GOLD, 0, 0);
     expect(p.wallet).toBe(120);
     expect(p.score).toBe(120);
-    p.lvl.oreValue = 2;
-    onDug(p, Tile.COPPER, 0);
-    expect(p.wallet).toBe(120 + 9);
-    onDug(p, Tile.SAND, Tile.GEM); // sand hiding a gem
-    expect(p.score).toBe(120 + 9 + 480);
-    onDug(p, Tile.DIRT, 0);
-    expect(p.score).toBe(120 + 9 + 480);
+    onDug(p, Tile.COPPER, 0, 100);
+    expect(p.wallet).toBe(120 + 16);
+    onDug(p, Tile.SAND, Tile.GEM, 50); // sand hiding a gem
+    expect(p.score).toBe(120 + 16 + 600);
+    onDug(p, Tile.DIRT, 0, 50);
+    expect(p.score).toBe(120 + 16 + 600);
   });
 
   it('heal restores 50% of max hp, capped, with no money or score', () => {
     const p = newPlayer();
     p.hull = 30;
-    onDug(p, Tile.HEAL, 0);
+    onDug(p, Tile.HEAL, 0, 80);
     expect(p.hull).toBe(80);
-    onDug(p, Tile.HEAL, 0);
+    onDug(p, Tile.HEAL, 0, 80);
     expect(p.hull).toBe(100);
     p.lvl.maxHp = 5;
     p.hull = 10;
-    onDug(p, Tile.HEAL, 0);
+    onDug(p, Tile.HEAL, 0, 80);
     expect(p.hull).toBe(110);
     expect(p.wallet).toBe(0);
     expect(p.score).toBe(0);
@@ -111,14 +236,15 @@ describe('death', () => {
   it('simTick kills at hull<=0 and respawns on the surface', () => {
     const w = new World(1337);
     const sand = new SandSim();
-    const pl = createPlayer(3, newPlayer());
+    const pl = createPlayer(3, newPlayer(), w);
     pl.stats.score = 77;
     pl.stats.hull = 0;
     const ev = simTick(w, sand, [pl], new Map(), 1);
     expect(ev.deaths).toEqual([3]);
     expect(pl.stats.highScore).toBe(77);
     expect(pl.stats.hull).toBe(100);
-    expect(pl.pod.y).toBe(-T.podHalf);
+    expect(Number.isInteger(pl.pod.y + T.podHalf)).toBe(true);
+    expect(w.get(Math.floor(pl.pod.x), pl.pod.y + T.podHalf)).not.toBe(Tile.EMPTY);
   });
 
   it('purchases never reduce score (seeded property test)', () => {
@@ -135,7 +261,7 @@ describe('death', () => {
           if (r !== 'ok') expect(p.wallet).toBe(walletBefore);
           else expect(p.wallet).toBeLessThan(walletBefore);
         } else {
-          onDug(p, ores[(h >>> 4) % 5], 0);
+          onDug(p, ores[(h >>> 4) % 5], 0, h % 90);
           expect(p.score).toBeGreaterThanOrEqual(scoreBefore);
         }
         expect(p.wallet).toBeGreaterThanOrEqual(0);

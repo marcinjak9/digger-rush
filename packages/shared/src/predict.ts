@@ -1,5 +1,5 @@
 import { Tile } from './tiles.js';
-import type { World } from './world.js';
+import type { TileChange, World } from './world.js';
 import { decodePod } from './net.js';
 import { stepPod, type PodEvents, type PodState } from './pod.js';
 import { inputFromMask, isNewerSeq, MAX_CMD_TICKS } from './input.js';
@@ -12,6 +12,8 @@ export interface PendingCmd {
   sent: boolean;
 }
 
+// A tile the local pod dug ahead of the server. `tile` / `aux` are the value the SERVER has for that cell as far as we
+// know: the original tile, updated whenever a server delta for the cell arrives. Reverting restores that value.
 interface PredictedDig {
   seq: number;
   x: number;
@@ -38,6 +40,8 @@ export class Predictor {
   private head = 0;
   private len = 0;
   private readonly digs: PredictedDig[] = [];
+  // Cells the server reported dug (EV_DIG) since the last reconcile.
+  private readonly confirmed = new Set<number>();
   private pendingTicks_ = 0;
 
   constructor(world: World, pod: PodState, lvl: Levels) {
@@ -59,6 +63,7 @@ export class Predictor {
   // Resets prediction to a server state (welcome, respawn). Pending commands are dropped.
   reset(serverPod: ArrayLike<number>, ackSeq: number): void {
     this.revertDigs();
+    this.confirmed.clear();
     this.len = 0;
     this.head = 0;
     this.pendingTicks_ = 0;
@@ -105,6 +110,21 @@ export class Predictor {
     }
   }
 
+  // Applies a tile the server sent. Use this instead of writing to the world directly: when the cell is also a
+  // predicted dig, the server value is remembered so a later revert restores the truth (no phantom tile).
+  applyServer(ch: TileChange): void {
+    for (let i = 0; i < this.digs.length; i++) {
+      const d = this.digs[i];
+      if (d.x === ch.x && d.y === ch.y) { d.tile = ch.tile; d.aux = ch.aux; }
+    }
+    this.world.applyChanges([ch]);
+  }
+
+  // The server confirmed (EV_DIG) that this cell was dug by this player's acknowledged input.
+  onServerDig(x: number, y: number): void {
+    this.confirmed.add(y * 65536 + x);
+  }
+
   // Rewinds to the exact server pod (encodePod output), drops acknowledged commands and replays the
   // rest. Returns the correction error: how far the pod moved, in tiles.
   reconcile(serverPod: ArrayLike<number>, ackSeq: number): number {
@@ -118,10 +138,17 @@ export class Predictor {
       this.head = (this.head + 1) % CAP;
       this.len--;
     }
-    // Digs of acknowledged commands are in the server world; the others are redone by the replay.
+    // Digs of acknowledged commands are in the server world only if the server reported them (EV_DIG, sent in
+    // the same tick as the ack); an acknowledged dig the server never made (its pod took another path) is
+    // put back to the server value below. Unacknowledged digs are redone by the replay.
     let keep = 0;
-    for (let i = 0; i < this.digs.length; i++) if (isNewerSeq(this.digs[i].seq, ackSeq)) this.digs[keep++] = this.digs[i];
+    for (let i = 0; i < this.digs.length; i++) {
+      const d = this.digs[i];
+      if (isNewerSeq(d.seq, ackSeq)) { this.digs[keep++] = d; continue; }
+      if (!this.confirmed.has(d.y * 65536 + d.x)) this.restore(d);
+    }
     this.digs.length = keep;
+    this.confirmed.clear();
     this.revertDigs();
     decodePod(serverPod, this.pod);
     for (let i = 0; i < this.len; i++) {
@@ -146,11 +173,12 @@ export class Predictor {
   }
 
   private revertDigs(): void {
-    for (let i = this.digs.length - 1; i >= 0; i--) {
-      const d = this.digs[i];
-      if (this.world.get(d.x, d.y) === Tile.EMPTY) this.world.set(d.x, d.y, d.tile, d.aux);
-    }
+    for (let i = this.digs.length - 1; i >= 0; i--) this.restore(this.digs[i]);
     this.digs.length = 0;
     this.world.dirty.clear();
+  }
+
+  private restore(d: PredictedDig): void {
+    if (this.world.get(d.x, d.y) !== d.tile || this.world.getAux(d.x, d.y) !== d.aux) this.world.set(d.x, d.y, d.tile, d.aux);
   }
 }

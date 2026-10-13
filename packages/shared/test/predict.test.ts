@@ -14,7 +14,7 @@ function scriptMask(tick: number): number {
   return packInput({ left: false, right: false, up: true, down: false });
 }
 
-interface Snap { at: number; pod: number[]; ack: number; changes: TileChange[] }
+interface Snap { at: number; pod: number[]; ack: number; changes: TileChange[]; digs: Array<[number, number]> }
 
 function runScenario(latencyUp: number, latencyDown: number, ticks: number, tweak?: (serverWorld: World, t: number, server: ReturnType<typeof createPlayer>) => void) {
   const serverWorld = new World(T.SEED);
@@ -28,6 +28,7 @@ function runScenario(latencyUp: number, latencyDown: number, ticks: number, twea
   let maxErr = 0;
   let reconciles = 0;
   let digs = 0;
+  let digCells: Array<[number, number]> = [];
   for (let t = 0; t < ticks + latencyUp + latencyDown + 8; t++) {
     const live = t < ticks;
     if (live) pred.applyLocal(scriptMask(t));
@@ -41,14 +42,17 @@ function runScenario(latencyUp: number, latencyDown: number, ticks: number, twea
         out.dug.length = 0;
         stepPlayerTick(serverWorld, server, inputFromMask(cmd.mask), out);
         digs += out.dug.length;
+        for (const d of out.dug) digCells.push([d.x, d.y]);
       }
       ack = cmd.seq;
     }
     if (tweak) tweak(serverWorld, t, server);
-    if (t % 2 === 0) downlink.push({ at: t + latencyDown, pod: encodePod(server.pod), ack, changes: serverWorld.drainChanges() });
+    if (t % 2 === 0) downlink.push({ at: t + latencyDown, pod: encodePod(server.pod), ack, changes: serverWorld.drainChanges(), digs: digCells });
+    if (t % 2 === 0) digCells = [];
     while (downlink.length > 0 && downlink[0].at <= t) {
       const s = downlink.shift()!;
-      clientWorld.applyChanges(s.changes);
+      for (const [dx, dy] of s.digs) pred.onServerDig(dx, dy); // EV_DIG
+      for (const ch of s.changes) pred.applyServer(ch);
       const err = pred.reconcile(s.pod, s.ack);
       reconciles++;
       if (err > maxErr) maxErr = err;
@@ -111,6 +115,57 @@ describe('Predictor', () => {
     expect(w.get(dugAt.x, dugAt.y)).toBe(Tile.EMPTY); // replayed
     const pod = decodePod(encodePod(pred.pod));
     expect(pod.y).toBeCloseTo(pred.pod.y, 6);
+  });
+});
+
+describe('predicted dig ghosts', () => {
+  // Digs down until the predictor reports a dug tile; returns that cell.
+  function digOne(pred: Predictor): { x: number; y: number; tile: number } {
+    for (let i = 0; i < 400; i++) {
+      const ev = pred.applyLocal(8);
+      if (ev.dug !== null) return { x: ev.dug.x, y: ev.dug.y, tile: ev.dug.tile };
+    }
+    throw new Error('nothing dug');
+  }
+
+  it('puts back an acknowledged predicted dig the server never made (no ghost hole)', () => {
+    const w = new World(T.SEED);
+    const server = new World(T.SEED);
+    const pl = createPlayer(1, newPlayer(), server);
+    const start = encodePod(pl.pod);
+    const pred = new Predictor(w, clonePod(pl.pod), newPlayer().lvl);
+    const cell = digOne(pred);
+    expect(w.get(cell.x, cell.y)).toBe(Tile.EMPTY);
+    // the server acknowledged everything but its pod went elsewhere: no EV_DIG, no tile delta for the cell
+    pred.reconcile(start, pred.nextSeq - 1);
+    expect(w.get(cell.x, cell.y)).toBe(cell.tile);
+    expect(server.get(cell.x, cell.y)).toBe(cell.tile);
+    expect(pred.pendingTicks).toBe(0);
+  });
+
+  it('keeps an acknowledged dig the server confirmed with EV_DIG', () => {
+    const w = new World(T.SEED);
+    const server = new World(T.SEED);
+    const pl = createPlayer(1, newPlayer(), server);
+    const pred = new Predictor(w, clonePod(pl.pod), newPlayer().lvl);
+    const cell = digOne(pred);
+    pred.onServerDig(cell.x, cell.y);
+    pred.applyServer({ tick: 0, x: cell.x, y: cell.y, tile: Tile.EMPTY, aux: 0 });
+    pred.reconcile(encodePod(pl.pod), pred.nextSeq - 1);
+    expect(w.get(cell.x, cell.y)).toBe(Tile.EMPTY);
+  });
+
+  it('does not restore a stale solid tile when the server emptied the cell itself (no phantom tile)', () => {
+    const w = new World(T.SEED);
+    const server = new World(T.SEED);
+    const pl = createPlayer(1, newPlayer(), server);
+    const start = encodePod(pl.pod);
+    const pred = new Predictor(w, clonePod(pl.pod), newPlayer().lvl);
+    const cell = digOne(pred);
+    // someone else dug it / sand started falling: the server delta arrives while our dig is still unacknowledged
+    pred.applyServer({ tick: 0, x: cell.x, y: cell.y, tile: Tile.EMPTY, aux: 0 });
+    pred.reset(start, 0); // e.g. a respawn: pending commands are dropped, predicted digs reverted
+    expect(w.get(cell.x, cell.y)).toBe(Tile.EMPTY);
   });
 });
 

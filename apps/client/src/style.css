@@ -42,4 +42,5 @@ button:disabled { background: #555; color: #999; cursor: default; }
 
 #netstatus { position: fixed; top: 0; left: 0; right: 0; padding: 10px; text-align: center; background: rgba(200, 40, 40, 0.9); color: #fff; font-weight: bold; z-index: 50; pointer-events: none; }
 #netstatus.hidden { display: none; }
+#netstatus.notice { background: rgba(40, 110, 200, 0.92); }
 #start button:disabled { opacity: 0.6; }

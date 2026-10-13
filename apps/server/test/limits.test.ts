@@ -97,7 +97,7 @@ describe('message limits', () => {
     expect(room.stats.rateLimited).toBeGreaterThan(100);
     expect(room.stats.kicked).toBeGreaterThanOrEqual(1);
     const elapsed = (Date.now() - t0) / 1000;
-    expect(room.stats.inputTicks - before).toBeLessThanOrEqual(elapsed * 60 + T.net.burstTicks + 4);
+    expect(room.stats.inputTicks - before).toBeLessThanOrEqual(elapsed * 60 + T.net.burstTicks + T.net.catchupBankTicks + 4);
   });
 
   it('drops bursts of buy, radar and ping beyond their buckets', async () => {

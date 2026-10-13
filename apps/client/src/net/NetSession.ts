@@ -14,6 +14,10 @@ import { nickColor } from './color.js';
 const MAX_STEPS_PER_FRAME = 6;
 const MS_PER_SERVER_TICK_DEFAULT = 1000 / T.net.serverHz;
 const SAND_VISUAL_MAX_AGE = 60 * T.TICK_HZ;
+const WATCHDOG_MS = 3000; // no snapshot for this long: the connection is dead
+const VISUAL_EVENT_CAP = 400; // visual-only events buffered between frames
+const CHUNK_EVICT_EVERY_TICKS = 120;
+const CHUNK_KEEP_RADIUS = 4; // chunks (Chebyshev) around the pod kept in the client world; the server subscribes 2
 
 function buyText(ki: number, code: number): string {
   const name = ki >= 0 && ki < UPGRADE_KINDS.length ? UPGRADE_KINDS[ki] : 'upgrade';
@@ -28,12 +32,17 @@ function buyText(ki: number, code: number): string {
   }
 }
 
+// VITE_SERVER_URL overrides everything. Production builds are served by the game server itself, so the websocket
+// is same-origin (wss on https, ws on http, same host and port). The vite dev server only serves the page, the game
+// server runs next to it on :2567.
 export function serverUrl(): string {
-  const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  const env = (import.meta as unknown as { env?: Record<string, string | boolean | undefined> }).env;
   const v = env?.VITE_SERVER_URL;
-  if (v !== undefined && v !== '') return v;
+  if (typeof v === 'string' && v !== '') return v;
+  const secure = typeof location !== 'undefined' && location.protocol === 'https:';
+  const proto = secure ? 'wss' : 'ws';
+  if (env?.PROD === true && typeof location !== 'undefined' && location.host !== '') return `${proto}://${location.host}`;
   const host = typeof location !== 'undefined' && location.hostname !== '' ? location.hostname : 'localhost';
-  const proto = typeof location !== 'undefined' && location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${host}:2567`;
 }
 
@@ -161,18 +170,39 @@ export class NetSession implements GameSession {
   private onWelcome: ((m: WelcomeMsg) => void) | null = null;
   private closed = false;
   private lastSnapT = -1;
+  private lastSnapAt = 0;
+  private lastResumed = true;
+  private hiddenChanges = new Map<number, TileChange>();
+  private noticeSeq = 0;
+  readonly notice = { seq: 0, text: '' };
+  private readonly onVisibility = (): void => {
+    if (typeof document === 'undefined') return;
+    if (document.hidden) {
+      this.sandBlocks.length = 0;
+      this.pendSand.length = 0;
+    } else {
+      // Back in the tab: give the connection a fresh 3 s to show a snapshot, else it is treated as dead.
+      this.lastSnapAt = performance.now();
+    }
+  };
 
   constructor(nickname: string) {
     this.nickname = nickname;
     this.token = loadToken();
     this.client = new Client(serverUrl());
     this.predictor = new Predictor(this.world, this.player.pod, this.player.stats.lvl);
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.onVisibility);
   }
 
   // Joins (or rejoins) a room and resolves after the welcome message. Rejects with a readable message.
   static async connect(nickname: string): Promise<NetSession> {
     const s = new NetSession(nickname);
-    await s.join(true);
+    try {
+      await s.join(true);
+    } catch (e) {
+      s.close(); // never leave a stray joined room (or its listeners) behind
+      throw e;
+    }
     s.pingTimer = setInterval(() => s.sendPing(), T.net.pingEveryMs);
     return s;
   }
@@ -196,31 +226,44 @@ export class NetSession implements GameSession {
       room = await this.client.joinOrCreate(ROOM_NAME, opts);
     }
     this.attach(room);
-    const welcome = await new Promise<WelcomeMsg>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('The server did not answer.')), 8000);
-      this.onWelcome = (m) => { clearTimeout(timer); resolve(m); };
-      room.send(MSG.READY, {});
-    });
-    this.handleWelcome(welcome);
+    try {
+      const welcome = await new Promise<WelcomeMsg>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('The server did not answer.')), 8000);
+        this.onWelcome = (m) => { clearTimeout(timer); resolve(m); };
+        room.send(MSG.READY, {});
+      });
+      this.onWelcome = null;
+      this.handleWelcome(welcome);
+    } catch (e) {
+      // The room was joined but the handshake failed: leave it, or the server keeps a seat (and a later
+      // reconnect could kick the live tab).
+      if (this.room === room) this.room = null;
+      try { void room.leave(true); } catch { /* already closed */ }
+      throw e;
+    }
   }
 
   private attach(room: Room): void {
     this.room = room;
-    room.onMessage(MSG.WELCOME, (m: WelcomeMsg) => this.onWelcome?.(m));
-    room.onMessage(MSG.SNAP, (m: SnapMsg) => this.onSnap(m));
-    room.onMessage(MSG.TILES, (m: TilesMsg) => this.onTiles(m));
-    room.onMessage(MSG.CHUNKS, (m: ChunksMsg) => this.onChunks(m));
-    room.onMessage(MSG.UNSUB, (m: UnsubMsg) => this.onUnsub(m));
-    room.onMessage(MSG.SAND, (m: SandMsg) => this.onSand(m));
-    room.onMessage(MSG.EV, (m: EvMsg) => this.onEv(m));
-    room.onMessage(MSG.JOINED, (m: JoinedMsg) => this.onJoined(m));
-    room.onMessage(MSG.LEFT, (m: LeftMsg) => this.onLeft(m));
-    room.onMessage(MSG.LB, (m: LbMsg) => this.onLb(m));
-    room.onMessage(MSG.PONG, (m: PongMsg) => { this.net.pingMs = Math.round(performance.now() - m.t); });
+    // Messages of a room we have given up on (dead connection, replaced by a reconnect) must not touch the state.
+    const on = <M>(type: string, fn: (m: M) => void): void => {
+      room.onMessage(type, (m: M) => { if (room === this.room) fn(m); });
+    };
+    on<WelcomeMsg>(MSG.WELCOME, (m) => this.onWelcome?.(m));
+    on<SnapMsg>(MSG.SNAP, (m) => this.onSnap(m));
+    on<TilesMsg>(MSG.TILES, (m) => this.onTiles(m));
+    on<ChunksMsg>(MSG.CHUNKS, (m) => this.onChunks(m));
+    on<UnsubMsg>(MSG.UNSUB, (m) => this.onUnsub(m));
+    on<SandMsg>(MSG.SAND, (m) => this.onSand(m));
+    on<EvMsg>(MSG.EV, (m) => this.onEv(m));
+    on<JoinedMsg>(MSG.JOINED, (m) => this.onJoined(m));
+    on<LeftMsg>(MSG.LEFT, (m) => this.onLeft(m));
+    on<LbMsg>(MSG.LB, (m) => this.onLb(m));
+    on<PongMsg>(MSG.PONG, (m) => { this.net.pingMs = Math.round(performance.now() - m.t); });
     room.onLeave((code) => {
       if (room !== this.room || this.closed) return;
       this.room = null;
-      if (code === 4403) this.fail('Opened in another tab.');
+      if (code === 4403) this.fail('Opened in another tab or window with the same session. Reload to play again.');
       else void this.reconnect();
     });
     room.onError(() => { /* the leave handler deals with it */ });
@@ -231,6 +274,23 @@ export class NetSession implements GameSession {
     this.statusText = text;
     this.closed = true;
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.onVisibility);
+  }
+
+  // Tells the player something once (the page shows it for a few seconds).
+  private notify(text: string): void {
+    this.notice.seq = ++this.noticeSeq;
+    this.notice.text = text;
+  }
+
+  // The connection looks dead (no snapshots): abandon this socket and rejoin with the same token.
+  private dropConnection(): void {
+    const room = this.room;
+    this.room = null;
+    if (room !== null) {
+      try { void room.leave(false); } catch { /* half open socket */ }
+    }
+    void this.reconnect();
   }
 
   private async reconnect(): Promise<void> {
@@ -238,35 +298,55 @@ export class NetSession implements GameSession {
     this.status = 'reconnecting';
     this.statusText = 'Reconnecting...';
     const start = performance.now();
+    let lastFull = false;
     while (!this.closed && performance.now() - start < T.net.reconnectWindowMs) {
       try {
         await this.join(false);
         this.status = 'ok';
         this.statusText = '';
+        if (!this.lastResumed) this.startedOver();
         return;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (/version|token|nickname/i.test(msg)) break;
-        if (/not found|expired|locked|full/i.test(msg)) {
-          // The room is gone (server restarted or the window passed): carry on as a new player.
+        if (/locked|full|maxClients/i.test(msg)) {
+          // Our seat may be taken by newcomers during the window: keep trying until the window ends.
+          lastFull = true;
+          this.statusText = 'Reconnecting... (the room is full, waiting for a seat)';
+        } else if (/not found|expired|invalid/i.test(msg)) {
+          // The room is gone (server restarted): carry on in a new world only after telling the player.
+          lastFull = false;
           const before = this.roomId;
           try {
             await this.join(true);
           } catch { await new Promise((r) => setTimeout(r, T.net.reconnectRetryMs)); continue; }
           if (this.roomId !== before) {
-            // A different world: what is on screen is stale. Start over from the start screen.
+            // A different world: what is on screen is stale.
             this.fail('The server restarted. Reload the page to play again.');
             try { void this.room?.leave(); } catch { /* ignore */ }
             return;
           }
           this.status = 'ok';
           this.statusText = '';
+          if (!this.lastResumed) this.startedOver();
           return;
+        } else {
+          lastFull = false;
         }
         await new Promise((r) => setTimeout(r, T.net.reconnectRetryMs));
       }
     }
-    if (!this.closed) this.fail('Connection lost. Reload the page to play again.');
+    if (!this.closed) {
+      this.fail(lastFull ? 'The room filled up while you were away. Reload the page to try again.' : 'Connection lost. Reload the page to play again.');
+    }
+  }
+
+  // The server no longer had our player (disconnected longer than the reconnect window): everything restarted.
+  private startedOver(): void {
+    this.board = { rows: [], rank: 1, count: 1, hi: 0, sc: 0 };
+    this.buyFeedback.text = '';
+    this.buyFeedback.seq++;
+    this.notify('You were disconnected too long, starting over.');
   }
 
   private sendPing(): void {
@@ -277,7 +357,10 @@ export class NetSession implements GameSession {
   close(): void {
     this.closed = true;
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
-    try { void this.room?.leave(); } catch { /* ignore */ }
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.onVisibility);
+    const room = this.room;
+    this.room = null;
+    try { void room?.leave(); } catch { /* ignore */ }
   }
 
   // ------------------------------------------------------------------ server messages
@@ -285,6 +368,12 @@ export class NetSession implements GameSession {
   private handleWelcome(m: WelcomeMsg): void {
     if (m.simVersion !== SIM_VERSION) throw new Error('Your game version is out of date. Please reload the page.');
     if (m.seed !== this.world.seed) throw new Error('World seed mismatch. Please reload the page.');
+    this.lastResumed = m.resumed;
+    this.lastSnapAt = performance.now();
+    this.pendDug.length = 0;
+    this.pendSand.length = 0;
+    this.pendChanges.length = 0;
+    this.hiddenChanges.clear();
     this.myId = m.id;
     this.player.id = m.id;
     this.roomId = m.roomId;
@@ -342,6 +431,8 @@ export class NetSession implements GameSession {
     if (Number.isNaN(this.clockOffset) || d < this.clockOffset) this.clockOffset = d;
     else this.clockOffset += (d - this.clockOffset) * 0.02;
     this.lastSnapT = m.t;
+    this.lastSnapAt = now;
+    if (this.hidden) this.stashOwnChanges(); // reverts made by reconcile while no frame drains them
     const o = m.o;
     for (let i = 0; i + OTHER_STRIDE <= o.length; i += OTHER_STRIDE) {
       const id = o[i];
@@ -362,10 +453,34 @@ export class NetSession implements GameSession {
     }
   }
 
+  private get hidden(): boolean {
+    return typeof document !== 'undefined' && document.hidden;
+  }
+
+  // Server tile writes go through the predictor so it knows the server value of cells it predicted.
+  // In a hidden tab nothing drains the buffers (no animation frames): keep only the newest change per cell.
   private writeTile(x: number, y: number, v: number): void {
     const ch: TileChange = { tick: 0, x, y, tile: v & 255, aux: v >> 8 };
-    this.world.applyChanges([ch]);
-    this.pendChanges.push(ch);
+    this.predictor.applyServer(ch);
+    if (this.hidden) this.hiddenChanges.set(y * T.WORLD_W + x, ch);
+    else this.pendChanges.push(ch);
+  }
+
+  private stashOwnChanges(): void {
+    const own = this.world.drainChanges();
+    for (const c of own) this.hiddenChanges.set(c.y * T.WORLD_W + c.x, c);
+  }
+
+  // Drops far chunks from the client world (they regenerate from the seed, and the server resends its diff
+  // when they are subscribed again). Keeps memory flat while exploring.
+  private evictFarChunks(): void {
+    const pcx = Math.floor(this.player.pod.x / T.CHUNK);
+    const pcy = Math.floor(this.player.pod.y / T.CHUNK);
+    for (const key of this.world.chunks.keys()) {
+      const cx = chunkCx(key);
+      const cy = chunkCy(key);
+      if (Math.abs(cx - pcx) > CHUNK_KEEP_RADIUS || Math.abs(cy - pcy) > CHUNK_KEEP_RADIUS) this.world.chunks.delete(key);
+    }
   }
 
   private onTiles(m: TilesMsg): void {
@@ -414,6 +529,7 @@ export class NetSession implements GameSession {
   }
 
   private onSand(m: SandMsg): void {
+    if (this.hidden) return; // visual only; nothing would draw or drain it
     const d = m.d;
     for (let i = 0; i + 3 <= d.length; i += 3) {
       const kind = d[i];
@@ -423,32 +539,32 @@ export class NetSession implements GameSession {
       const y = Math.floor(fy);
       switch (kind) {
         case SAND_WOBBLE:
-          this.pendSand.push({ kind: 'wobble', tick: 0, x, y });
-          if (this.findVisual(x, y, false) === null) {
+          if (this.pendSand.length < VISUAL_EVENT_CAP) this.pendSand.push({ kind: 'wobble', tick: 0, x, y });
+          if (this.sandBlocks.length < VISUAL_EVENT_CAP && this.findVisual(x, y, false) === null) {
             const tile = this.world.get(x, y);
             this.sandBlocks.push({ x, y, tile: TILES[tile].falls ? tile : Tile.SAND, t: 0, falling: false, acc: 0, age: 0 });
           }
           break;
         case SAND_FALL: {
-          this.pendSand.push({ kind: 'fall', tick: 0, x, y });
+          if (this.pendSand.length < VISUAL_EVENT_CAP) this.pendSand.push({ kind: 'fall', tick: 0, x, y });
           const w = this.findVisual(x, y, false);
           if (w !== null) {
             w.falling = true;
             w.acc = 0;
             w.age = 0;
-          } else {
+          } else if (this.sandBlocks.length < VISUAL_EVENT_CAP) {
             this.sandBlocks.push({ x, y, tile: Tile.SAND, t: 0, falling: true, acc: 0, age: 0 });
           }
           break;
         }
         case SAND_LAND: {
-          this.pendSand.push({ kind: 'land', tick: 0, x, y });
+          if (this.pendSand.length < VISUAL_EVENT_CAP) this.pendSand.push({ kind: 'land', tick: 0, x, y });
           const k = this.nearestFalling(x, y);
           if (k >= 0) this.removeVisual(k);
           break;
         }
         case SAND_HIT: {
-          this.pendSand.push({ kind: 'hit', tick: 0, x: fx, y: fy, podId: 0, damage: 0 });
+          if (this.pendSand.length < VISUAL_EVENT_CAP) this.pendSand.push({ kind: 'hit', tick: 0, x: fx, y: fy, podId: 0, damage: 0 });
           const k = this.nearestFalling(x, y);
           if (k >= 0) this.removeVisual(k);
           break;
@@ -470,7 +586,8 @@ export class NetSession implements GameSession {
       const kind = d[i];
       if (kind === EV_DIG) {
         const v = d[i + 3];
-        this.pendDug.push({ id: this.myId, x: d[i + 1], y: d[i + 2], tile: v & 255, aux: v >> 8 });
+        this.predictor.onServerDig(d[i + 1], d[i + 2]); // confirms the predicted dig of this cell
+        if (!this.hidden && this.pendDug.length < VISUAL_EVENT_CAP) this.pendDug.push({ id: this.myId, x: d[i + 1], y: d[i + 2], tile: v & 255, aux: v >> 8 });
       } else if (kind === EV_DEATH) {
         this.pendDied = true;
       } else if (kind === EV_RESPAWN) {
@@ -555,6 +672,14 @@ export class NetSession implements GameSession {
     fx.changes = this.pendChanges;
     this.pendChanges = ch;
     this.pendChanges.length = 0;
+    if (this.hiddenChanges.size > 0) {
+      // changes collected while the tab was hidden come first (they are older)
+      fx.changes = [...this.hiddenChanges.values(), ...fx.changes];
+      this.hiddenChanges.clear();
+    }
+    if (this.status === 'ok' && this.room !== null && performance.now() - this.lastSnapAt > WATCHDOG_MS) {
+      this.dropConnection(); // no snapshot for 3 s: half open socket (sleep, Wi-Fi switch)
+    }
     fx.damage = this.pendDamage;
     fx.died = this.pendDied;
     fx.respawned = this.pendRespawned;
@@ -580,6 +705,7 @@ export class NetSession implements GameSession {
     const own = this.world.drainChanges();
     for (const c of own) fx.changes.push(c);
 
+    if (this.tick % CHUNK_EVICT_EVERY_TICKS === 0) this.evictFarChunks();
     this.net.pendingTicks = this.predictor.pendingTicks;
     this.updateRemotes();
   }

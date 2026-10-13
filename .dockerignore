@@ -1,0 +1,8 @@
+node_modules
+**/node_modules
+apps/client/dist
+.git
+*.md
+!README.md
+.claude
+npm-debug.log

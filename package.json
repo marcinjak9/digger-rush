@@ -13,7 +13,8 @@
     "dev:server": "npm run dev -w @digger/server",
     "dev:client": "npm run dev -w @digger/client",
     "start:server": "npm run start -w @digger/server",
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run typecheck && npm run build -w @digger/client",
+    "start": "npm run start -w @digger/server",
     "loadtest": "npm run loadtest -w @digger/server --"
   },
   "devDependencies": {

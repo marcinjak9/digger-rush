@@ -82,7 +82,7 @@ describe('server', () => {
     b.tiles.length = 0;
     c.tiles.length = 0;
     const digsBefore = a.digEvents;
-    a.step(60, DOWN);
+    for (let k = 0; k < 6; k++) { a.step(10, DOWN); await sleep(100); }
     await a.settle();
     expect(a.maxError).toBe(0);
     expect(a.digEvents).toBeGreaterThan(digsBefore);
@@ -190,7 +190,7 @@ describe('server', () => {
     expect(stats.rejected).toBeGreaterThanOrEqual(rejectedBefore + 4);
     expect(stats.inputTicks - ticksBefore).toBe(4);
 
-    // flood: 38 commands x 4 ticks at once; only about real time worth is consumed
+    // flood: 38 commands x 4 ticks at once; at most real time (plus the banked allowance) is consumed
     const t0 = Date.now();
     const c0 = stats.inputTicks;
     for (let i = 0; i < 38; i++) a.room.send(MSG.IN, { seq: 10 + i, ticks: 4, mask: RIGHT });
@@ -198,7 +198,7 @@ describe('server', () => {
     const elapsedSec = (Date.now() - t0) / 1000;
     const consumed = stats.inputTicks - c0;
     // real time at 60 ticks/s plus the burst allowance (and one server tick of slack)
-    expect(consumed).toBeLessThanOrEqual(T.net.burstTicks + elapsedSec * T.TICK_HZ + T.net.simTicksPerServerTick * 2);
+    expect(consumed).toBeLessThanOrEqual(T.net.burstTicks + T.net.catchupBankTicks + elapsedSec * T.TICK_HZ + T.net.simTicksPerServerTick * 2);
     expect(consumed).toBeLessThan(38 * 4);
     await a.close();
   });

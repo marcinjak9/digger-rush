@@ -4,7 +4,8 @@ import { Server, matchMaker } from '@colyseus/core';
 import { WebSocketTransport } from '@colyseus/ws-transport';
 import { ROOM_NAME, T } from '@digger/shared';
 import { DigRoom } from './DigRoom.js';
-import { joinLimiter, tickStats } from './limits.js';
+import { joinLimiter, tickStats, trustedAddress } from './limits.js';
+import { StaticSite } from './static.js';
 import { serverConfig, setServerConfig, type ServerConfig } from './config.js';
 
 export interface GameServer {
@@ -19,6 +20,7 @@ export interface GameServer {
 export function createGameServer(config: Partial<ServerConfig> = {}): GameServer {
   setServerConfig(config);
   joinLimiter.configure(serverConfig.joinsPerWindow, serverConfig.joinWindowMs);
+  const site = serverConfig.staticDir !== null ? new StaticSite(serverConfig.staticDir) : null;
   const http = createServer((req, res) => {
     // CORS for the plain HTTP routes (matchmaking adds its own headers).
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -35,21 +37,36 @@ export function createGameServer(config: Partial<ServerConfig> = {}): GameServer
     if (req.url === '/stats' || req.url?.startsWith('/stats?')) {
       // Aggregate counters only: no nicknames, tokens or addresses.
       const body = { ...tickStats.summary(), rooms: matchMaker.stats.local.roomCount, players: matchMaker.stats.local.ccu, joinTable: joinLimiter.size };
-      if (req.url.includes('reset=1')) tickStats.reset();
+      if (req.url.includes('reset=1')) {
+        // Resetting needs the ADMIN_TOKEN (x-admin-token header or token= query); without one it is disabled.
+        const given = String(req.headers['x-admin-token'] ?? new URL(req.url, 'http://x').searchParams.get('token') ?? '');
+        if (serverConfig.adminToken === '' || given !== serverConfig.adminToken) {
+          res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'reset needs ADMIN_TOKEN' }));
+          return;
+        }
+        tickStats.reset();
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
+      return;
+    }
+    if (site !== null) {
+      void site.handle(req, res).then((done) => { if (!done) res.writeHead(404).end(); }).catch(() => { if (!res.headersSent) res.writeHead(500).end(); });
       return;
     }
     res.writeHead(404).end();
   });
   const transport = new WebSocketTransport({ server: http, maxPayload: T.net.maxPayloadBytes });
-  // Forwarded-for headers are client controlled: unless TRUST_PROXY=1, replace them with the socket address
-  // before Colyseus reads them into the auth context.
+  // Forwarded headers are client controlled: unless TRUST_PROXY=1, replace them with the socket address before
+  // Colyseus reads them into the auth context. With TRUST_PROXY=1 the first hop (or CF-Connecting-IP) is used.
+  const normalizeAddress = (req: IncomingMessage): void => {
+    const addr = serverConfig.trustProxy ? trustedAddress(req.headers, req.socket.remoteAddress) : req.socket.remoteAddress ?? 'unknown';
+    delete req.headers['x-forwarded-for'];
+    delete req.headers['cf-connecting-ip'];
+    req.headers['x-real-ip'] = addr;
+  };
   (transport as unknown as { wss: WebSocketServer }).wss.prependListener('connection', (_raw: unknown, req: IncomingMessage) => {
-    if (!serverConfig.trustProxy) {
-      delete req.headers['x-forwarded-for'];
-      req.headers['x-real-ip'] = req.socket.remoteAddress ?? 'unknown';
-    }
+    normalizeAddress(req);
   });
   const server = new Server({ transport, greet: false });
   server.define(ROOM_NAME, DigRoom);
@@ -58,6 +75,9 @@ export function createGameServer(config: Partial<ServerConfig> = {}): GameServer
     http,
     async listen(port: number): Promise<number> {
       await server.listen(port, '0.0.0.0');
+      // Matchmaking POSTs are answered by Colyseus' own request listener (installed by listen): normalise
+      // the client address before it runs.
+      http.prependListener('request', normalizeAddress);
       const addr = http.address();
       return typeof addr === 'object' && addr !== null ? addr.port : port;
     },

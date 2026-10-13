@@ -55,7 +55,7 @@ export class Ui {
   shopOpen = false;
   debugOpen = false;
 
-  constructor(private readonly root: HTMLElement, private readonly cb: UiCallbacks) {
+  constructor(private readonly root: HTMLElement, private readonly cb: UiCallbacks, tuning = false) {
     root.innerHTML = `
       <div id="hud" class="hidden">
         <div class="hud-left">
@@ -94,7 +94,12 @@ export class Ui {
       this.buy.set(kind, b);
       this.shopRows.set(kind, { lvl: row.children[1] as HTMLElement, cost: row.children[2] as HTMLElement });
     }
-    for (const t of TUNEABLE) {
+    if (!tuning) {
+      const note = document.createElement('div');
+      note.textContent = 'Tuning is read-only online (add ?local=1 to the address to tweak physics offline).';
+      this.el.dbgtune.appendChild(note);
+    }
+    for (const t of tuning ? TUNEABLE : []) {
       const row = document.createElement('div');
       row.className = 'tune';
       const val = document.createElement('span');
@@ -111,12 +116,14 @@ export class Ui {
       this.tuneVals.set(t.key, val);
       this.el.dbgtune.appendChild(row);
     }
-    const reset = document.createElement('button');
-    reset.textContent = 'reset';
-    reset.addEventListener('click', () => {
-      for (const k of Object.keys(DEFAULTS)) (T as unknown as Record<string, number>)[k] = DEFAULTS[k];
-    });
-    this.el.dbgtune.appendChild(reset);
+    if (tuning) {
+      const reset = document.createElement('button');
+      reset.textContent = 'reset';
+      reset.addEventListener('click', () => {
+        for (const k of Object.keys(DEFAULTS)) (T as unknown as Record<string, number>)[k] = DEFAULTS[k];
+      });
+      this.el.dbgtune.appendChild(reset);
+    }
   }
 
   show(on: boolean): void {

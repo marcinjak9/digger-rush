@@ -86,6 +86,8 @@ export interface GameSession {
   buy(kind: UpgradeKind): BuyResult | 'dead';
   useRadar(): 'ok' | 'cooldown' | 'dead';
   getBoard(): BoardData;
+  /** One-off message for the player (e.g. a session restart); `seq` changes when a new one is posted. */
+  readonly notice?: { seq: number; text: string };
   /** Latest purchase verdict; `seq` changes whenever a new one arrives. */
   readonly buyFeedback: { seq: number; text: string };
 }

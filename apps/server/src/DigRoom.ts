@@ -32,6 +32,8 @@ export interface RoomStats {
   rateLimited: number;
   kicked: number;
   inputTicks: number; // sim ticks consumed from commands, all players
+  skipped: number; // queued ticks skipped to recover from a backlog
+  notReady: number; // connections dropped for never sending ready
 }
 
 // Everything the server knows about one player. Survives a disconnect for the reconnect window.
@@ -43,6 +45,8 @@ export class PlayerRec implements InterestState {
   ready = false;
   everReady = false;
   disconnectedAt = 0;
+  joinedAt = 0;
+  allowAt = 0; // performance.now() of the last allowance accrual
   readonly known = new Set<number>(); // other pod ids the client has been told about
   readonly visible: PlayerRec[] = [];
 
@@ -77,7 +81,7 @@ export class PlayerRec implements InterestState {
   violations = 0;
   lastBuyTick = -1000;
 
-  constructor(readonly id: number, readonly token: string, readonly nick: string, readonly sim: SimPlayer) {}
+  constructor(readonly id: number, readonly token: string, public nick: string, readonly sim: SimPlayer) {}
 
   get connected(): boolean {
     return this.client !== null;
@@ -88,7 +92,7 @@ export class DigRoom extends Room {
   readonly world = new World(T.SEED);
   readonly sand = new SandSim();
   readonly heal = new HealSpawner(this.world);
-  readonly stats: RoomStats = { rejected: 0, staleSeq: 0, clamped: 0, overflow: 0, rateLimited: 0, kicked: 0, inputTicks: 0 };
+  readonly stats: RoomStats = { rejected: 0, staleSeq: 0, clamped: 0, overflow: 0, rateLimited: 0, kicked: 0, inputTicks: 0, skipped: 0, notReady: 0 };
   serverTick = 0;
   worldTick = 0;
   readonly players = new Map<number, PlayerRec>(); // by id, ascending insertion order
@@ -152,6 +156,7 @@ export class DigRoom extends Room {
     let rec = this.byToken.get(auth.token);
     if (rec !== undefined) {
       // Reattach to the surviving player (reconnect, or the same token opened twice).
+      rec.nick = auth.nick; // a new tab / reconnect may carry a new nickname
       const old = rec.client;
       if (old !== null) {
         this.bySession.delete(old.sessionId);
@@ -170,6 +175,7 @@ export class DigRoom extends Room {
     rec.client = client;
     rec.ready = false;
     rec.disconnectedAt = 0;
+    rec.joinedAt = Date.now();
     this.bySession.set(client.sessionId, rec);
     this.activeDirty = true;
     this.idleSince = 0;
@@ -214,6 +220,8 @@ export class DigRoom extends Room {
     }
     rec.ready = true;
     rec.everReady = true;
+    this.activeDirty = true;
+    rec.allowAt = performance.now();
     rec.disconnectedAt = 0;
     rec.lastSeq = 0;
     rec.ackSeq = 0;
@@ -356,7 +364,7 @@ export class DigRoom extends Room {
   private activePlayers(): SimPlayer[] {
     if (this.activeDirty) {
       this.active = [];
-      for (const rec of this.players.values()) if (rec.client !== null) this.active.push(rec.sim);
+      for (const rec of this.players.values()) if (rec.client !== null && rec.ready) this.active.push(rec.sim);
       this.activeDirty = false;
     }
     return this.active;
@@ -386,12 +394,17 @@ export class DigRoom extends Room {
     const out = this.out;
     const simTicks = T.net.simTicksPerServerTick;
 
-    // 1. player pods: consume queued commands within the tick allowance
+    // 1. player pods: consume queued commands within the allowance. The allowance accrues from elapsed
+    // wall-clock time (not per server tick), so a server hitch or an input stall is made up (up to a bank
+    // of ~1 s) instead of becoming a permanent backlog; consumption never exceeds real time since ready.
+    const nowP = performance.now();
+    const allowCap = T.net.burstTicks + T.net.catchupBankTicks;
     for (const rec of this.players.values()) {
       if (rec.client === null) continue;
-      rec.allowance += simTicks;
-      if (rec.allowance > T.net.burstTicks) rec.allowance = T.net.burstTicks;
-      this.consumeInputs(rec);
+      rec.allowance += (nowP - rec.allowAt) * T.TICK_HZ / 1000;
+      rec.allowAt = nowP;
+      if (rec.allowance > allowCap) rec.allowance = allowCap;
+      if (rec.ready) this.consumeInputs(rec);
     }
 
     // 2. the world: sand, hits, deaths, respawn timers
@@ -433,6 +446,7 @@ export class DigRoom extends Room {
     // 5. housekeeping: forgive old violations, reconnect window and idle room
     if (this.serverTick % 30 === 0) for (const rec of this.players.values()) if (rec.violations > 0) rec.violations = Math.max(0, rec.violations - 10);
     for (const rec of this.players.values()) {
+      if (rec.client !== null && !rec.ready && now - rec.joinedAt >= serverConfig.readyTimeoutMs) this.dropNotReady(rec);
       if (rec.client === null && rec.disconnectedAt > 0 && now - rec.disconnectedAt >= serverConfig.reconnectWindowMs) {
         this.removePlayer(rec);
       }
@@ -468,6 +482,40 @@ export class DigRoom extends Room {
       rec.qHead = (h + 1) % cap;
       rec.qLen--;
     }
+    // Still a deep backlog after spending the whole budget (a long stall, or a client sending faster than
+    // real time): skip the oldest commands so the pod catches up. The ack moves past them, so the client
+    // simply does not replay them.
+    if (rec.qLen > 1) this.skipBacklog(rec);
+  }
+
+  private skipBacklog(rec: PlayerRec): void {
+    const cap = T.net.inputQueueMax;
+    let queued = 0;
+    for (let i = 0; i < rec.qLen; i++) queued += rec.qTicks[(rec.qHead + i) % cap];
+    if (queued <= T.net.maxBacklogTicks) return;
+    while (rec.qLen > 1 && queued > T.net.keepBacklogTicks) {
+      const h = rec.qHead;
+      queued -= rec.qTicks[h];
+      this.stats.skipped += rec.qTicks[h];
+      rec.ackSeq = rec.qSeq[h];
+      rec.qHead = (h + 1) % cap;
+      rec.qLen--;
+    }
+  }
+
+  // A connection that joined but never sent ready: drop it so it takes no seat, sim time or leaderboard row.
+  private dropNotReady(rec: PlayerRec): void {
+    const c = rec.client;
+    if (c === null) return;
+    this.stats.notReady++;
+    if (rec.everReady) {
+      c.leave(4405, 'Handshake timed out.'); // onLeave keeps the record for the reconnect window
+      return;
+    }
+    rec.client = null;
+    this.bySession.delete(c.sessionId);
+    this.removePlayer(rec);
+    c.leave(4405, 'Handshake timed out.');
   }
 
   // Turns the events of the last sim step into personal events and routed sand events, then clears them.
@@ -582,7 +630,7 @@ export class DigRoom extends Room {
   private sendLeaderboard(): void {
     const recs = this.lbRecs;
     recs.length = 0;
-    for (const r of this.players.values()) recs.push(r);
+    for (const r of this.players.values()) if (r.everReady) recs.push(r);
     recs.sort((a, b) => b.sim.stats.highScore - a.sim.stats.highScore || a.id - b.id);
     const top: Array<[string, number, number]> = [];
     for (let i = 0; i < recs.length && i < 3; i++) top.push([recs[i].nick, recs[i].sim.stats.highScore, recs[i].id]);

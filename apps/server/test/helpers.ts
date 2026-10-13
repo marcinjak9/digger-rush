@@ -83,7 +83,7 @@ export class TestClient {
       for (let i = 0; i + 3 <= m.d.length; i += 3) {
         const ch = { tick: 0, x: m.d[i], y: m.d[i + 1], tile: m.d[i + 2] & 255, aux: m.d[i + 2] >> 8 };
         this.tiles.push(ch);
-        this.world.applyChanges([ch]);
+        this.predictor.applyServer(ch);
       }
     });
     r.onMessage(MSG.CHUNKS, (m: ChunksMsg) => {
@@ -93,13 +93,13 @@ export class TestClient {
         const by = Math.floor(key / T.CHUNKS_X) * T.CHUNK;
         for (let i = 0; i < flat.length; i += 2) {
           const v = flat[i + 1];
-          this.world.applyChanges([{ tick: 0, x: bx + (flat[i] & 15), y: by + (flat[i] >> 4), tile: v & 255, aux: v >> 8 }]);
+          this.predictor.applyServer({ tick: 0, x: bx + (flat[i] & 15), y: by + (flat[i] >> 4), tile: v & 255, aux: v >> 8 });
         }
       }
     });
     r.onMessage(MSG.EV, (m: EvMsg) => {
       for (let i = 0; i < m.d.length; i += EV_LEN[m.d[i]]) {
-        if (m.d[i] === EV_DIG) this.digEvents++;
+        if (m.d[i] === EV_DIG) { this.digEvents++; this.predictor.onServerDig(m.d[i + 1], m.d[i + 2]); }
         this.evs.push(m.d.slice(i, i + EV_LEN[m.d[i]]));
       }
     });

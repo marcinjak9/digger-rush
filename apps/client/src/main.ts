@@ -17,7 +17,7 @@ function showStart(onPlay: (name: string) => Promise<string | null>): void {
   box.innerHTML = `<h1>DIGGER RUSH</h1>
     <form><input id="nick" maxlength="40" autocomplete="off" placeholder="Nickname (2-16 chars)" /><button type="submit">Play</button></form>
     <div id="starterr"></div>
-    <div class="keys">A/D move + side drill &middot; S drill down &middot; W thrust &middot; SPACE radar &middot; B shop &middot; F3 debug</div>`;
+    <div class="keys">A/D move + side drill &middot; S drill down &middot; W thrust &middot; SPACE radar &middot; B shop &middot; F3 debug info</div>`;
   document.body.appendChild(box);
   const input = box.querySelector('#nick') as HTMLInputElement;
   const err = box.querySelector('#starterr') as HTMLElement;
@@ -50,10 +50,11 @@ function startGame(session: GameSession): void {
   statusEl.id = 'netstatus';
   statusEl.className = 'hidden';
   document.body.appendChild(statusEl);
+  // Live tuning of the shared constants only makes sense offline: online it would desync prediction.
   const ui = new Ui(uiRoot, {
     onBuy: (kind) => { session.buy(kind); },
     onToggleShop: () => ui.setShop(!ui.shopOpen),
-  });
+  }, session.status === 'local');
   const renderer = new Renderer(canvas, session);
   const keys = new Keyboard({
     toggleShop: () => ui.setShop(!ui.shopOpen),
@@ -67,6 +68,8 @@ function startGame(session: GameSession): void {
   let last = performance.now();
   let fps = 60;
   let boardTimer = 1; // forces an immediate update
+  let noticeSeen = session.notice?.seq ?? 0;
+  let noticeUntil = 0;
   const frame = (now: number): void => {
     const dt = Math.min(0.25, (now - last) / 1000);
     last = now;
@@ -84,8 +87,17 @@ function startGame(session: GameSession): void {
       ui.setLeaderboard(b.rows, b.rank, session);
     }
     const bad = session.status === 'reconnecting' || session.status === 'lost';
-    statusEl.classList.toggle('hidden', !bad);
-    if (bad && statusEl.textContent !== session.statusText) statusEl.textContent = session.statusText;
+    const nt = session.notice;
+    if (nt !== undefined && nt.seq !== noticeSeen) {
+      noticeSeen = nt.seq;
+      noticeUntil = now + 7000;
+      ui.setShop(false); // a restarted session: stale UI state goes away
+    }
+    const showNotice = !bad && now < noticeUntil;
+    statusEl.classList.toggle('hidden', !bad && !showNotice);
+    statusEl.classList.toggle('notice', showNotice);
+    const msg = bad ? session.statusText : showNotice && nt !== undefined ? nt.text : '';
+    if (msg !== '' && statusEl.textContent !== msg) statusEl.textContent = msg;
     ui.update(session, fps, renderer.stats);
     requestAnimationFrame(frame);
   };

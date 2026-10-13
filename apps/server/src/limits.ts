@@ -75,6 +75,18 @@ export function clientAddress(ip: string | string[] | undefined): string {
   return parts[parts.length - 1].trim() || 'unknown';
 }
 
+// Client address behind a trusted proxy (TRUST_PROXY=1): Cloudflare's CF-Connecting-IP if present, else the
+// first hop of X-Forwarded-For (ngrok, cloudflared, nginx...), else X-Real-IP, else the socket address.
+export function trustedAddress(h: Record<string, string | string[] | undefined>, socketAddr: string | undefined): string {
+  const one = (v: string | string[] | undefined): string => (Array.isArray(v) ? v[0] : v) ?? '';
+  const cf = one(h['cf-connecting-ip']).trim();
+  if (cf !== '') return cf;
+  const xff = one(h['x-forwarded-for']).split(',')[0].trim();
+  if (xff !== '') return xff;
+  const real = one(h['x-real-ip']).trim();
+  return real !== '' ? real : socketAddr ?? 'unknown';
+}
+
 // Server tick time recorder (ms) over a ring of recent ticks. No personal data.
 export class TickStats {
   private readonly ring = new Float64Array(2048);

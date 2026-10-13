@@ -1,5 +1,6 @@
 const TOKEN_KEY = 'digger.token';
 const ROOM_KEY = 'digger.room';
+const TOKEN_RE = /^[A-Za-z0-9_-]{16,64}$/;
 
 function randomToken(): string {
   const bytes = new Uint8Array(24);
@@ -12,13 +13,22 @@ function randomToken(): string {
 
 let memToken = '';
 
-// Random per browser session token; the server keeps the player for a minute after a disconnect.
+// The session token and room id live in sessionStorage: it survives a reload of the same tab (the server keeps
+// the player for a minute) but a new tab starts empty, so two tabs are two players. localStorage is only a
+// fallback when sessionStorage is unavailable (then two tabs share one identity, as before).
+function store(): Storage | null {
+  try { return sessionStorage; } catch { /* blocked */ }
+  try { return localStorage; } catch { return null; }
+}
+
 export function loadToken(): string {
+  const st = store();
   try {
-    const t = localStorage.getItem(TOKEN_KEY);
-    if (t !== null && /^[A-Za-z0-9_-]{16,64}$/.test(t)) return t;
+    const t = st?.getItem(TOKEN_KEY) ?? null;
+    if (t !== null && TOKEN_RE.test(t)) return t;
     const n = randomToken();
-    localStorage.setItem(TOKEN_KEY, n);
+    st?.setItem(TOKEN_KEY, n);
+    if (st === null) { memToken = memToken === '' ? n : memToken; return memToken; }
     return n;
   } catch {
     if (memToken === '') memToken = randomToken();
@@ -27,9 +37,9 @@ export function loadToken(): string {
 }
 
 export function loadRoomId(): string {
-  try { return localStorage.getItem(ROOM_KEY) ?? ''; } catch { return ''; }
+  try { return store()?.getItem(ROOM_KEY) ?? ''; } catch { return ''; }
 }
 
 export function saveRoomId(id: string): void {
-  try { localStorage.setItem(ROOM_KEY, id); } catch { /* storage unavailable */ }
+  try { store()?.setItem(ROOM_KEY, id); } catch { /* storage unavailable */ }
 }

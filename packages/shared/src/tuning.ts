@@ -151,7 +151,11 @@ export const T = {
     serverHz: 30, // server loop rate
     simTicksPerServerTick: 2, // 60 Hz sim ticks each server tick grants per player
     snapEveryTicks: 1, // a snapshot every N server ticks
-    burstTicks: 8, // cap on a player's saved-up tick allowance
+    burstTicks: 15, // steady-state burst of a player's tick allowance (allowance accrues from wall-clock time)
+    catchupBankTicks: 45, // extra banked allowance so a stall of up to ~1 s is made up instead of lost
+    maxBacklogTicks: 36, // queued ticks above this (an honest client never has more than clientMaxPendingTicks=30) are skipped...
+    keepBacklogTicks: 8, // ...down to this many, so latency recovers
+    readyTimeoutMs: 5000, // a connection that never sends ready is dropped
     inputQueueMax: 40, // queued commands per player; overflow is dropped
     maxCmdTicks: 4, // ticks a single command may cover
     clientSendEveryTicks: 2, // client flushes input about every N local ticks
@@ -180,7 +184,7 @@ export const T = {
     pingBurst: 6,
     readyBurst: 2,
     maxPayloadBytes: 1024, // websocket frames above this close the connection
-    joinsPerWindow: 10, // per address
+    joinsPerWindow: 30, // per address
     joinWindowMs: 60000,
     maxRooms: 20, // global safeguard
   },

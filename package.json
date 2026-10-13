@@ -6,8 +6,8 @@
   "scripts": {
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "vitest run",
-    "dev": "echo dev: not set up yet (later work packages)",
-    "build": "echo build: not set up yet (later work packages)"
+    "dev": "npm run dev -w @digger/client",
+    "build": "npm run build -w @digger/client"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

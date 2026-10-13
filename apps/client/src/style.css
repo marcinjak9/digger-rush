@@ -1,0 +1,37 @@
+html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #fff; font-family: system-ui, sans-serif; }
+canvas#game { position: fixed; inset: 0; display: block; image-rendering: pixelated; }
+#ui { position: fixed; inset: 0; pointer-events: none; }
+#ui button, #ui input, #ui .panel, #ui #debug { pointer-events: auto; }
+.hidden { display: none !important; }
+button { font: inherit; padding: 6px 12px; border: 0; border-radius: 6px; background: #f08a24; color: #231200; font-weight: 700; cursor: pointer; }
+button:disabled { background: #555; color: #999; cursor: default; }
+#hud { position: absolute; inset: 0; }
+.hud-left { position: absolute; left: 12px; top: 10px; display: flex; flex-direction: column; gap: 6px; text-shadow: 0 1px 3px #000; }
+.hpbar { position: relative; width: 240px; height: 20px; background: rgba(0,0,0,.55); border: 2px solid #000; border-radius: 4px; overflow: hidden; }
+#hpfill { height: 100%; background: linear-gradient(#ff5a5a, #c01d1d); }
+#hptext { position: absolute; inset: 0; text-align: center; font-size: 13px; line-height: 20px; font-weight: 700; }
+.stats { display: flex; gap: 14px; font-size: 15px; }
+.hud-right { position: absolute; right: 12px; top: 10px; display: flex; gap: 10px; align-items: center; font-size: 13px; text-shadow: 0 1px 3px #000; }
+.hud-right button { pointer-events: auto; }
+#board { position: absolute; right: 12px; top: 52px; width: 200px; padding: 8px 10px; background: rgba(0,0,0,.5); border-radius: 6px; font-size: 13px; }
+#board h4 { margin: 0 0 4px; font-size: 13px; }
+#board ol { margin: 0; padding-left: 20px; }
+#board li.me { color: #ffe14d; }
+#boardme { margin-top: 6px; color: #bbb; font-size: 12px; }
+.overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+#death { background: rgba(80,0,0,.55); }
+.panel { background: rgba(20,14,10,.92); padding: 20px 28px; border-radius: 10px; min-width: 280px; text-align: center; border: 2px solid #3a2a1c; }
+.panel h1, .panel h2 { margin-top: 0; }
+.hint { color: #aaa; font-size: 13px; margin: 10px 0; }
+.shoprow { display: grid; grid-template-columns: 1fr 64px 64px 64px; gap: 10px; align-items: center; margin: 8px 0; text-align: left; }
+.shopname small { display: block; color: #999; font-size: 11px; }
+#debug { position: absolute; left: 12px; bottom: 12px; background: rgba(0,0,0,.7); padding: 8px 10px; font-size: 12px; border-radius: 6px; max-width: 420px; }
+#debug pre { margin: 0 0 6px; font-family: ui-monospace, Consolas, monospace; }
+.tune { display: flex; gap: 6px; align-items: center; font-family: ui-monospace, Consolas, monospace; margin: 2px 0; }
+.tune button, #debug button { padding: 0 8px; font-size: 12px; }
+#start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; background: linear-gradient(#0b1a3a, #3b2a1c); pointer-events: auto; }
+#start h1 { font-size: 48px; margin: 0; letter-spacing: 2px; color: #f08a24; text-shadow: 0 3px 0 #5a2d00; }
+#start form { display: flex; gap: 8px; }
+#start input { font: inherit; padding: 8px 12px; border-radius: 6px; border: 2px solid #3a2a1c; width: 220px; }
+#starterr { color: #ff8a8a; min-height: 20px; font-size: 14px; }
+#start .keys { color: #bbb; font-size: 13px; }

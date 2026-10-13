@@ -280,3 +280,23 @@ describe('death', () => {
     }
   });
 });
+
+describe('live high score', () => {
+  it('highScore follows the score as it rises, never decreases, and survives death', () => {
+    const p = newPlayer(10);
+    onDug(p, Tile.COPPER, 0, 0); // +8
+    expect(p.score).toBe(8);
+    expect(p.highScore).toBe(10);
+    onDug(p, Tile.GOLD, 0, 0); // +120
+    expect(p.highScore).toBe(128);
+    const before = p.highScore;
+    buyUpgrade(p, 'drill'); // spends wallet only
+    expect(p.score).toBe(128);
+    expect(p.highScore).toBe(before);
+    die(p);
+    expect(p.score).toBe(0);
+    expect(p.highScore).toBe(128);
+    onDug(p, Tile.COPPER, 0, 0);
+    expect(p.highScore).toBe(128); // 8 < 128
+  });
+});

@@ -1,5 +1,5 @@
 import {
-  T, World, SandSim, simTick, createPlayer, newPlayer, buyUpgrade, tryRadar, NO_INPUT,
+  T, Tile, World, SandSim, simTick, createPlayer, newPlayer, buyUpgrade, tryRadar, NO_INPUT,
   type PodInput, type SimPlayer, type SimDug, type SandEvent, type TileChange, type UpgradeKind, type BuyResult,
 } from '@digger/shared';
 
@@ -12,6 +12,7 @@ export interface FrameFx {
   damage: number; // hull lost this frame (after armor)
   died: boolean;
   respawned: boolean;
+  healed: boolean; // heal ore was mined (server confirmed in net mode)
 }
 
 // What the renderer needs to draw one sand block (a SandSim block, or a client side animation).
@@ -44,6 +45,8 @@ export interface BoardData {
   rows: Array<{ name: string; score: number; me: boolean }>;
   rank: number;
   count: number;
+  hi: number; // own highScore
+  sc: number; // own current score
 }
 
 export interface NetDebug {
@@ -83,6 +86,8 @@ export interface GameSession {
   buy(kind: UpgradeKind): BuyResult | 'dead';
   useRadar(): 'ok' | 'cooldown' | 'dead';
   getBoard(): BoardData;
+  /** Latest purchase verdict; `seq` changes whenever a new one arrives. */
+  readonly buyFeedback: { seq: number; text: string };
 }
 
 const MAX_STEPS_PER_FRAME = 6;
@@ -93,7 +98,7 @@ export class LocalSession implements GameSession {
   readonly player: SimPlayer;
   readonly nickname: string;
   readonly fx: FrameFx = {
-    dug: [], sand: [], changes: [], hardLandVy: 0, softLandVy: 0, damage: 0, died: false, respawned: false,
+    dug: [], sand: [], changes: [], hardLandVy: 0, softLandVy: 0, damage: 0, died: false, respawned: false, healed: false,
   };
   readonly prev = { x: 0, y: 0 };
   readonly latencyLabel = 'local';
@@ -101,6 +106,7 @@ export class LocalSession implements GameSession {
   readonly status: ConnectionStatus = 'local';
   readonly statusText = '';
   readonly net = null;
+  readonly buyFeedback = { seq: 0, text: '' };
   tick = 0;
   radarPings = 0;
   private acc = 0;
@@ -142,6 +148,7 @@ export class LocalSession implements GameSession {
     fx.damage = 0;
     fx.died = false;
     fx.respawned = false;
+    fx.healed = false;
     this.acc += dtSec > 0.25 ? 0.25 : dtSec;
     let steps = 0;
     while (this.acc >= T.DT) {
@@ -167,7 +174,10 @@ export class LocalSession implements GameSession {
     const vyBefore = pod.vy;
     this.inputs.set(pl.id, input);
     const ev = simTick(this.world, this.sand, [pl], this.inputs, this.tick);
-    for (const d of ev.dug) fx.dug.push(d);
+    for (const d of ev.dug) {
+      fx.dug.push(d);
+      if (d.tile === Tile.HEAL) fx.healed = true;
+    }
     for (const e of ev.sand) fx.sand.push(e);
     if (ev.respawns.length > 0) {
       fx.respawned = true;
@@ -195,12 +205,15 @@ export class LocalSession implements GameSession {
 
   buy(kind: UpgradeKind): BuyResult | 'dead' {
     if (this.dead) return 'dead';
-    return buyUpgrade(this.player.stats, kind);
+    const r = buyUpgrade(this.player.stats, kind);
+    this.buyFeedback.seq++;
+    this.buyFeedback.text = r === 'ok' ? `Bought ${kind}` : r === 'funds' ? 'Not enough money' : 'Already at the maximum level';
+    return r;
   }
 
   getBoard(): BoardData {
     const st = this.player.stats;
-    return { rows: [{ name: this.nickname, score: Math.max(st.score, st.highScore), me: true }], rank: 1, count: 1 };
+    return { rows: [{ name: this.nickname, score: Math.max(st.score, st.highScore), me: true }], rank: 1, count: 1, hi: st.highScore, sc: st.score };
   }
 }
 

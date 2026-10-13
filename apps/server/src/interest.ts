@@ -38,6 +38,10 @@ export class InterestIndex<P extends InterestState> {
     return this.byKey.has(key);
   }
 
+  keys(): IterableIterator<number> {
+    return this.byKey.keys();
+  }
+
   get size(): number {
     return this.byKey.size;
   }

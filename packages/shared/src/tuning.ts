@@ -134,6 +134,15 @@ export const T = {
   spawnScanRows: 40, // rows scanned from the top for the first solid tile
   spawnSalt: 90,
 
+  // Heal ore respawn (server only): a few heal tiles come back over time inside loaded chunks near players.
+  healRespawn: {
+    capPerChunk: 3, // respawned heal tiles alive in one chunk at once
+    attemptEveryTicks: 15, // server ticks between two attempts (one chunk per attempt, round robin)
+    ringRebuildTicks: 150, // server ticks between rebuilds of the active chunk ring
+    safeRadius: 28, // never within this many tiles (each axis) of any pod: outside light and viewport
+    salt: 8,
+  },
+
   respawnTicks: 180, // 3 s dead before the pod comes back
   invulnTicks: 180, // 3 s without damage after respawning
 
@@ -159,6 +168,7 @@ export const T = {
     leaderboardEveryTicks: 30,
     pingEveryMs: 2000,
     maxBuyPerSec: 10,
+    buyCooldownTicks: 3, // server ticks between two purchases of one player (~100 ms)
     maxRadarPerSec: 4,
     maxPingPerSec: 5,
     maxViolations: 200, // invalid messages before a client is dropped

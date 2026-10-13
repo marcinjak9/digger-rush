@@ -1,8 +1,8 @@
 import { Client, type Room } from 'colyseus.js';
 import {
-  EV_DEATH, EV_DIG, EV_LEN, EV_RESPAWN, MSG, OF_DEAD, OF_DRILLING, OF_FACE_DOWN, OF_FACE_RIGHT, OF_INVULN, OF_THRUSTING,
+  BUY_OK, BUY_BAD, BUY_COOLDOWN, BUY_DEAD, BUY_FUNDS, BUY_MAX, EV_BUY, EV_DEATH, EV_DIG, EV_HEAL, EV_LEN, EV_RESPAWN, UPGRADE_KINDS, MSG, OF_DEAD, OF_DRILLING, OF_FACE_DOWN, OF_FACE_RIGHT, OF_INVULN, OF_THRUSTING,
   OTHER_STRIDE, ROOM_NAME, SAND_CALM, SAND_FALL, SAND_HIT, SAND_LAND, SAND_WOBBLE, SIM_VERSION, T, Tile, TILES, World,
-  Predictor, chunkCx, chunkCy, newPlayer, newPod, packInput, radarCooldownTicksOf, readStats, upgradeCost,
+  Predictor, chunkCx, chunkCy, newPlayer, newPod, packInput, radarCooldownTicksOf, readStats,
   type BuyResult, type ChunksMsg, type DecodedStats, type EvMsg, type JoinedMsg, type LbMsg, type LeftMsg, type PodInput,
   type PongMsg, type SandEvent, type SandMsg, type SimDug, type SimPlayer, type SnapMsg, type TileChange, type TilesMsg,
   type UnsubMsg, type UpgradeKind, type WelcomeMsg,
@@ -14,6 +14,19 @@ import { nickColor } from './color.js';
 const MAX_STEPS_PER_FRAME = 6;
 const MS_PER_SERVER_TICK_DEFAULT = 1000 / T.net.serverHz;
 const SAND_VISUAL_MAX_AGE = 60 * T.TICK_HZ;
+
+function buyText(ki: number, code: number): string {
+  const name = ki >= 0 && ki < UPGRADE_KINDS.length ? UPGRADE_KINDS[ki] : 'upgrade';
+  switch (code) {
+    case BUY_OK: return `Bought ${name}`;
+    case BUY_FUNDS: return 'Not enough money';
+    case BUY_MAX: return 'Already at the maximum level';
+    case BUY_DEAD: return 'You are dead';
+    case BUY_COOLDOWN: return 'Slow down';
+    case BUY_BAD: return 'Unknown upgrade';
+    default: return '';
+  }
+}
 
 export function serverUrl(): string {
   const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
@@ -108,7 +121,7 @@ export class NetSession implements GameSession {
     id: 0, pod: newPod(0, 0), stats: newPlayer(0), spawnSalt: 0, deadTicks: 0, invulnTicks: 0, finalScore: 0,
   };
   readonly fx: FrameFx = {
-    dug: [], sand: [], changes: [], hardLandVy: 0, softLandVy: 0, damage: 0, died: false, respawned: false,
+    dug: [], sand: [], changes: [], hardLandVy: 0, softLandVy: 0, damage: 0, died: false, respawned: false, healed: false,
   };
   readonly prev = { x: 0, y: 0 };
   readonly sandBlocks: SandVisual[] = [];
@@ -135,9 +148,11 @@ export class NetSession implements GameSession {
   private pendDamage = 0;
   private pendDied = false;
   private pendRespawned = false;
+  private pendHealed = false;
+  readonly buyFeedback = { seq: 0, text: '' };
   private readonly remoteMap = new Map<number, Remote>();
   private readonly nicks = new Map<number, string>();
-  private board: BoardData = { rows: [], rank: 1, count: 1 };
+  private board: BoardData = { rows: [], rank: 1, count: 1, hi: 0, sc: 0 };
   private clockOffset = Number.NaN;
   private msPerTick = MS_PER_SERVER_TICK_DEFAULT;
   private snapCount = 0;
@@ -460,6 +475,12 @@ export class NetSession implements GameSession {
         this.pendDied = true;
       } else if (kind === EV_RESPAWN) {
         this.pendRespawned = true;
+      } else if (kind === EV_HEAL) {
+        this.pendHealed = true;
+      } else if (kind === EV_BUY) {
+        // the server's verdict; the new wallet / level arrive in the next snapshot
+        this.buyFeedback.seq++;
+        this.buyFeedback.text = buyText(d[i + 1], d[i + 2]);
       }
       const len = EV_LEN[kind];
       if (len === undefined) break;
@@ -486,9 +507,10 @@ export class NetSession implements GameSession {
   }
 
   private onLb(m: LbMsg): void {
-    const me = this.nickname;
     this.board = {
-      rows: m.top.map(([name, score]) => ({ name, score, me: name === me })),
+      rows: m.top.map(([name, score, id]) => ({ name, score, me: id === this.myId })),
+      hi: m.hi,
+      sc: m.sc,
       rank: m.rank,
       count: m.n,
     };
@@ -536,6 +558,8 @@ export class NetSession implements GameSession {
     fx.damage = this.pendDamage;
     fx.died = this.pendDied;
     fx.respawned = this.pendRespawned;
+    fx.healed = this.pendHealed;
+    this.pendHealed = false;
     this.pendDamage = 0;
     this.pendDied = false;
     this.pendRespawned = false;
@@ -634,10 +658,10 @@ export class NetSession implements GameSession {
     return 'ok';
   }
 
+  // Sends the request; whether it worked is decided by the server (EV_BUY, then the snapshot). Nothing is
+  // spent or changed locally.
   buy(kind: UpgradeKind): BuyResult | 'dead' {
     if (this.dead) return 'dead';
-    const st = this.player.stats;
-    if (st.wallet < upgradeCost(st.lvl[kind])) return 'funds';
     if (this.room === null) return 'funds';
     try { this.room.send(MSG.BUY, { kind }); } catch { /* reconnecting */ }
     return 'ok';

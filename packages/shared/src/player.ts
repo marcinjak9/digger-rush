@@ -64,6 +64,7 @@ export function onDug(p: Player, tile: number, aux: number, row: number): void {
   const v = oreValueAt(base, row);
   p.wallet += v;
   p.score += v;
+  if (p.score > p.highScore) p.highScore = p.score; // highScore = max(highScore, score), live
 }
 
 // Paid from the wallet only; score is never touched. 'max' only at the sanity cap (levelCap).

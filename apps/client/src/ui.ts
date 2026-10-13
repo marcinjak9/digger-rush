@@ -50,6 +50,8 @@ export class Ui {
   private readonly buy = new Map<UpgradeKind, HTMLButtonElement>();
   private readonly shopRows = new Map<UpgradeKind, { lvl: HTMLElement; cost: HTMLElement }>();
   private readonly tuneVals = new Map<string, HTMLElement>();
+  private buySeen = 0;
+  private buyMsgLeft = 0;
   shopOpen = false;
   debugOpen = false;
 
@@ -66,6 +68,7 @@ export class Ui {
       </div>
       <div id="shop" class="overlay hidden"><div class="panel">
         <h2>Upgrades</h2><div id="shoprows"></div>
+        <div id="shopmsg" class="hint"></div>
         <div class="hint">Wallet: <b id="shopwallet"></b> &middot; keys 1-5 buy &middot; B / Esc closes</div>
         <button id="shopclose">Close</button></div></div>
       <div id="death" class="overlay hidden"><div class="panel">
@@ -73,7 +76,7 @@ export class Ui {
         <div class="hint" id="drespawn"></div></div></div>
       <div id="debug" class="hidden"><pre id="dbgtext"></pre><div id="dbgtune"></div></div>`;
     for (const id of ['hud', 'hpfill', 'hptext', 'radar', 'radarfill', 'radartext', 'wallet', 'score', 'high', 'depth', 'net', 'fps', 'shopbtn', 'board', 'boardlist', 'boardme',
-      'shop', 'shoprows', 'shopwallet', 'shopclose', 'death', 'dscore', 'dhigh', 'drespawn', 'debug', 'dbgtext', 'dbgtune']) {
+      'shop', 'shoprows', 'shopwallet', 'shopmsg', 'shopclose', 'death', 'dscore', 'dhigh', 'drespawn', 'debug', 'dbgtext', 'dbgtune']) {
       this.el[id] = root.querySelector('#' + id) as HTMLElement;
     }
     this.el.shopbtn.addEventListener('click', () => cb.onToggleShop());
@@ -139,8 +142,8 @@ export class Ui {
       li.textContent = `${r.name} - ${r.score}`;
       list.appendChild(li);
     }
-    const st = s.player.stats;
-    setText(this.el.boardme, `You: #${rank} | best ${st.highScore} | now ${st.score}`);
+    const b = s.getBoard();
+    setText(this.el.boardme, `You: #${rank} | best ${b.hi} | now ${b.sc}`);
   }
 
   update(s: GameSession, fps: number, dbg: DebugStats): void {
@@ -156,6 +159,15 @@ export class Ui {
     setText(this.el.net, s.latencyLabel);
     setText(this.el.fps, Math.round(fps) + ' fps');
     setText(this.el.shopwallet, '$' + st.wallet);
+
+    const bf = s.buyFeedback;
+    if (bf.seq !== this.buySeen) {
+      this.buySeen = bf.seq;
+      this.buyMsgLeft = 90;
+      setText(this.el.shopmsg, bf.text);
+    } else if (this.buyMsgLeft > 0 && --this.buyMsgLeft === 0) {
+      setText(this.el.shopmsg, '');
+    }
 
     if (this.shopOpen) {
       for (const kind of UPGRADE_KINDS) {

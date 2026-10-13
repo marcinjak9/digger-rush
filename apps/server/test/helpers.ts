@@ -40,6 +40,7 @@ export class TestClient {
   tiles: TileChange[] = [];
   chunkMsgs: ChunksMsg[] = [];
   digEvents = 0;
+  evs: number[][] = []; // every personal event row: [kind, ...args]
   lb: LbMsg | null = null;
   pongs: number[] = [];
   joined: JoinedMsg[] = [];
@@ -97,7 +98,10 @@ export class TestClient {
       }
     });
     r.onMessage(MSG.EV, (m: EvMsg) => {
-      for (let i = 0; i < m.d.length; i += EV_LEN[m.d[i]]) if (m.d[i] === EV_DIG) this.digEvents++;
+      for (let i = 0; i < m.d.length; i += EV_LEN[m.d[i]]) {
+        if (m.d[i] === EV_DIG) this.digEvents++;
+        this.evs.push(m.d.slice(i, i + EV_LEN[m.d[i]]));
+      }
     });
     r.onMessage(MSG.LB, (m: LbMsg) => { this.lb = m; });
     r.onMessage(MSG.PONG, (m: PongMsg) => { this.pongs.push(m.t); });

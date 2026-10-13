@@ -109,9 +109,11 @@ export interface EvMsg {
 }
 
 export interface LbMsg {
-  top: Array<[string, number]>;
-  rank: number;
-  n: number;
+  top: Array<[string, number, number]>; // nickname, highScore, player id
+  rank: number; // own rank by highScore
+  n: number; // players listed (connected plus those inside their reconnect window)
+  hi: number; // own highScore
+  sc: number; // own current score
 }
 
 export interface PongMsg {
@@ -129,7 +131,17 @@ export const SAND_CALM = 4;
 export const EV_DIG = 0; // x, y, tile | aux << 8
 export const EV_DEATH = 1; // final score
 export const EV_RESPAWN = 2;
-export const EV_LEN: readonly number[] = [4, 2, 1];
+export const EV_BUY = 3; // upgrade kind index (-1 = unknown kind), BUY_* result
+export const EV_HEAL = 4; // heal ore was mined: the server already healed the pod
+export const EV_LEN: readonly number[] = [4, 2, 1, 3, 1];
+
+// Result codes of a purchase, sent back in EV_BUY.
+export const BUY_OK = 0;
+export const BUY_FUNDS = 1;
+export const BUY_MAX = 2;
+export const BUY_DEAD = 3;
+export const BUY_BAD = 4; // unknown kind
+export const BUY_COOLDOWN = 5;
 
 // Flags of an other pod.
 export const OF_FACE_RIGHT = 1;

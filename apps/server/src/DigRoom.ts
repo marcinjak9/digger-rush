@@ -1,14 +1,15 @@
 import { Room, ServerError, type Client } from '@colyseus/core';
 import {
-  EV_DEATH, EV_DIG, EV_RESPAWN, MSG, OF_DEAD, OF_DRILLING, OF_FACE_DOWN, OF_FACE_RIGHT, OF_INVULN, OF_THRUSTING,
+  BUY_BAD, BUY_COOLDOWN, BUY_DEAD, BUY_FUNDS, BUY_MAX, BUY_OK, EV_BUY, EV_DEATH, EV_DIG, EV_HEAL, EV_RESPAWN, MSG, OF_DEAD, OF_DRILLING, OF_FACE_DOWN, OF_FACE_RIGHT, OF_INVULN, OF_THRUSTING,
   OTHER_STRIDE, SAND_CALM, SAND_FALL, SAND_HIT, SAND_LAND, SAND_WOBBLE, SIM_VERSION, SandSim, T, UPGRADE_KINDS, World,
   buyUpgrade, chunkKeyOfTile, clampTicks, clearSimEvents, createPlayer, encodePod, inPodInterest,
   inputFromMask, isNewerSeq, isSolid, maxHpOf, newPlayer, newSimEvents, sanitizeNickname, spawnPod, stepPlayerTick,
-  stepWorldAfter, tryRadar, u32, writeStats,
-  type BuyMsg, type InMsg, type JoinOptions, type PingMsg, type SimEvents, type SimPlayer, type SnapMsg,
+  stepWorldAfter, tryRadar, u32, writeStats, Tile,
+  type BuyMsg, type InMsg, type JoinOptions, type PingMsg, type PodState, type SimEvents, type SimPlayer, type SnapMsg,
   type UpgradeKind, type WelcomeMsg, type SandEvent,
 } from '@digger/shared';
 import { serverConfig } from './config.js';
+import { HealSpawner } from './healSpawner.js';
 import { InterestIndex, chunkDiffFlat, dropSubscription, evictFarChunks, updateSubscription, type InterestState } from './interest.js';
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{16,64}$/;
@@ -71,6 +72,7 @@ export class PlayerRec implements InterestState {
   radars = 0;
   pings = 0;
   violations = 0;
+  lastBuyTick = -1000;
 
   constructor(readonly id: number, readonly token: string, readonly nick: string, readonly sim: SimPlayer) {}
 
@@ -82,6 +84,7 @@ export class PlayerRec implements InterestState {
 export class DigRoom extends Room {
   readonly world = new World(T.SEED);
   readonly sand = new SandSim();
+  readonly heal = new HealSpawner(this.world);
   readonly stats: RoomStats = { rejected: 0, staleSeq: 0, clamped: 0, overflow: 0, rateLimited: 0, inputTicks: 0 };
   serverTick = 0;
   worldTick = 0;
@@ -97,6 +100,7 @@ export class DigRoom extends Room {
   private lastPollAt = 0;
   private tickDebtMs = 0;
   private lbRecs: PlayerRec[] = [];
+  private readonly podScratch: PodState[] = [];
 
   override onCreate(): void {
     this.autoDispose = false; // we dispose ourselves after roomIdleMs without players
@@ -283,9 +287,23 @@ export class DigRoom extends Room {
     this.window(rec);
     if (++rec.buys > T.net.maxBuyPerSec) { this.stats.rateLimited++; return; }
     const kind = (m as Partial<BuyMsg> | null)?.kind;
-    if (typeof kind !== 'string' || !UPGRADE_KINDS.includes(kind as UpgradeKind)) { this.stats.rejected++; this.violate(rec); return; }
-    if (rec.sim.deadTicks > 0) return;
-    buyUpgrade(rec.sim.stats, kind as UpgradeKind);
+    const ki = typeof kind === 'string' ? UPGRADE_KINDS.indexOf(kind as UpgradeKind) : -1;
+    if (ki < 0) {
+      this.stats.rejected++;
+      this.violate(rec);
+      rec.evBuf.push(EV_BUY, -1, BUY_BAD);
+      return;
+    }
+    // Everything below is decided from server state only: alive, cooldown, funds. Wallet is the only thing spent.
+    let code: number;
+    if (rec.sim.deadTicks > 0) code = BUY_DEAD;
+    else if (this.serverTick - rec.lastBuyTick < T.net.buyCooldownTicks) { code = BUY_COOLDOWN; this.stats.rateLimited++; }
+    else {
+      rec.lastBuyTick = this.serverTick;
+      const r = buyUpgrade(rec.sim.stats, kind as UpgradeKind);
+      code = r === 'ok' ? BUY_OK : r === 'funds' ? BUY_FUNDS : BUY_MAX;
+    }
+    rec.evBuf.push(EV_BUY, ki, code);
   }
 
   private onRadar(client: Client): void {
@@ -352,6 +370,16 @@ export class DigRoom extends Room {
       this.routeOut();
     }
 
+    // 2b. heal ore respawn: one chunk of the active ring per attempt, through the normal tile delta path
+    const hr = T.healRespawn;
+    if (this.serverTick % hr.ringRebuildTicks === 1) this.heal.rebuild(this.interest.keys());
+    if (this.serverTick % hr.attemptEveryTicks === 0) {
+      const pods = this.podScratch;
+      pods.length = 0;
+      for (const rec of this.players.values()) pods.push(rec.sim.pod);
+      this.heal.attempt(pods);
+    }
+
     // 3. interest: new/left chunks, then bucket this tick's tile changes to subscribers
     for (const rec of this.players.values()) if (rec.ready) this.syncInterest(rec, false);
     const changes = this.world.drainChanges();
@@ -413,7 +441,10 @@ export class DigRoom extends Room {
   private routeOut(stepper?: PlayerRec): void {
     const out = this.out;
     if (out.dug.length > 0 && stepper !== undefined) {
-      for (const d of out.dug) stepper.evBuf.push(EV_DIG, d.x, d.y, d.tile | (d.aux << 8));
+      for (const d of out.dug) {
+        stepper.evBuf.push(EV_DIG, d.x, d.y, d.tile | (d.aux << 8));
+        if (d.tile === Tile.HEAL) stepper.evBuf.push(EV_HEAL); // shared onDug already healed 50% max hp, no money/score
+      }
     }
     for (const id of out.deaths) {
       const r = this.players.get(id);
@@ -512,18 +543,19 @@ export class DigRoom extends Room {
     client.send(MSG.SNAP, s);
   }
 
+  // Top 3 by highScore (ties by id) plus each player's own rank / highScore / score. Disconnected players
+  // inside their reconnect window are still listed. highScore already includes the live score.
   private sendLeaderboard(): void {
     const recs = this.lbRecs;
     recs.length = 0;
     for (const r of this.players.values()) recs.push(r);
-    const score = (r: PlayerRec): number => Math.max(r.sim.stats.score, r.sim.stats.highScore);
-    recs.sort((a, b) => score(b) - score(a) || a.id - b.id);
-    const top: Array<[string, number]> = [];
-    for (let i = 0; i < recs.length && i < 3; i++) top.push([recs[i].nick, score(recs[i])]);
+    recs.sort((a, b) => b.sim.stats.highScore - a.sim.stats.highScore || a.id - b.id);
+    const top: Array<[string, number, number]> = [];
+    for (let i = 0; i < recs.length && i < 3; i++) top.push([recs[i].nick, recs[i].sim.stats.highScore, recs[i].id]);
     for (let i = 0; i < recs.length; i++) {
       const r = recs[i];
       if (r.client === null || !r.ready) continue;
-      r.client.send(MSG.LB, { top, rank: i + 1, n: recs.length });
+      r.client.send(MSG.LB, { top, rank: i + 1, n: recs.length, hi: r.sim.stats.highScore, sc: r.sim.stats.score });
     }
   }
 

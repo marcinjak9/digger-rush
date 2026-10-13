@@ -104,6 +104,8 @@ showStart(async (name) => {
     return null;
   } catch (e) {
     const msg = e instanceof Error && e.message !== '' ? e.message : 'Could not reach the server.';
+    if (/full|locked|seat reservation|maxClients/i.test(msg)) return 'The server is full right now. Please try again in a moment.';
+    if (/did not answer|timeout|timed out/i.test(msg)) return 'The server did not answer. Please try again.';
     return /fetch|network|ECONN|failed|closed|WebSocket/i.test(msg) ? 'Could not reach the server. Is it running? (add ?local=1 to play offline)' : msg;
   }
 });

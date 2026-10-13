@@ -223,6 +223,10 @@ export class Renderer {
       this.radarY = pod.y * TS;
       this.radarStart = this.time;
     }
+    if (fx.healed) {
+      burst(pod.x * TS, pod.y * TS, 18, '#6dff9a', 160, 0.9, 80);
+      floatText(pod.x * TS, pod.y * TS - 24, '+HP', '#6dff9a');
+    }
     if (fx.damage > 0) this.flash = Math.min(0.6, this.flash + 0.25);
     if (fx.died) {
       this.radarStart = -1e9;

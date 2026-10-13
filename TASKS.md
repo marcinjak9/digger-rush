@@ -8,6 +8,6 @@ Branch: web-demo/initial. Commit after each work package; checks: `npm run typec
 - [x] WP4 death/respawn, shop validation, leaderboard, heal respawn
 - [x] WP5 abuse protection + load test
 - [x] WP6 ARCH review -> REVIEW.md
-- [ ] WP7 README, Dockerfile, overview.md status
+- [x] WP7 README, Dockerfile, overview.md status
 - [x] WP6b fix review blockers + single-process deploy (user: ready-to-deploy demo for friends)
-- [ ] WP8 browser QA of everything, fix bugs
+- [x] WP8 browser QA (single, two players, shop, radar, resume, leaderboard): passed

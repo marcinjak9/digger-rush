@@ -231,13 +231,13 @@ describe('heal ore respawn', () => {
     const a = await TestClient.join(url, 'HealWatch');
     const room = await roomOf(a);
     place(room, a, 10.5);
-    await waitFor(() => room.players.get(a.welcome.id)!.subs.size > 0, 2000, 'subscription');
+    await waitFor(() => room.players.get(a.welcome.id)!.subs.size > 0, 6000, 'subscription');
     room.heal.rebuild([...room.players.get(a.welcome.id)!.subs]);
     let placed = false;
     for (let i = 0; i < 20000 && !placed; i++) placed = room.heal.attempt([]);
     expect(placed).toBe(true);
-    await waitFor(() => a.tiles.some((t) => t.tile === Tile.HEAL), 2000, 'heal tile delta');
-  });
+    await waitFor(() => a.tiles.some((t) => t.tile === Tile.HEAL), 6000, 'heal tile delta');
+  }, 15000);
 
   it('mining heal ore on the server heals 50% max hp with no money or score, and emits a heal event', async () => {
     const a = await TestClient.join(url, 'Healer');

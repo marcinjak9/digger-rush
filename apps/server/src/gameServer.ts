@@ -1,9 +1,11 @@
-import { createServer, type Server as HttpServer } from 'node:http';
+import { createServer, type IncomingMessage, type Server as HttpServer } from 'node:http';
+import type { WebSocketServer } from 'ws';
 import { Server, matchMaker } from '@colyseus/core';
 import { WebSocketTransport } from '@colyseus/ws-transport';
-import { ROOM_NAME } from '@digger/shared';
+import { ROOM_NAME, T } from '@digger/shared';
 import { DigRoom } from './DigRoom.js';
-import { setServerConfig, type ServerConfig } from './config.js';
+import { joinLimiter, tickStats } from './limits.js';
+import { serverConfig, setServerConfig, type ServerConfig } from './config.js';
 
 export interface GameServer {
   readonly server: Server;
@@ -16,6 +18,7 @@ export interface GameServer {
 
 export function createGameServer(config: Partial<ServerConfig> = {}): GameServer {
   setServerConfig(config);
+  joinLimiter.configure(serverConfig.joinsPerWindow, serverConfig.joinWindowMs);
   const http = createServer((req, res) => {
     // CORS for the plain HTTP routes (matchmaking adds its own headers).
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -29,9 +32,26 @@ export function createGameServer(config: Partial<ServerConfig> = {}): GameServer
       res.end(JSON.stringify({ ok: true, rooms: matchMaker.stats.local.roomCount, players: matchMaker.stats.local.ccu }));
       return;
     }
+    if (req.url === '/stats' || req.url?.startsWith('/stats?')) {
+      // Aggregate counters only: no nicknames, tokens or addresses.
+      const body = { ...tickStats.summary(), rooms: matchMaker.stats.local.roomCount, players: matchMaker.stats.local.ccu, joinTable: joinLimiter.size };
+      if (req.url.includes('reset=1')) tickStats.reset();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+      return;
+    }
     res.writeHead(404).end();
   });
-  const server = new Server({ transport: new WebSocketTransport({ server: http }), greet: false });
+  const transport = new WebSocketTransport({ server: http, maxPayload: T.net.maxPayloadBytes });
+  // Forwarded-for headers are client controlled: unless TRUST_PROXY=1, replace them with the socket address
+  // before Colyseus reads them into the auth context.
+  (transport as unknown as { wss: WebSocketServer }).wss.prependListener('connection', (_raw: unknown, req: IncomingMessage) => {
+    if (!serverConfig.trustProxy) {
+      delete req.headers['x-forwarded-for'];
+      req.headers['x-real-ip'] = req.socket.remoteAddress ?? 'unknown';
+    }
+  });
+  const server = new Server({ transport, greet: false });
   server.define(ROOM_NAME, DigRoom);
   return {
     server,

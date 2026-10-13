@@ -12,7 +12,7 @@ let gs: GameServer;
 let url = '';
 
 beforeAll(async () => {
-  gs = createGameServer({ reconnectWindowMs: 5000, roomIdleMs: 4000 });
+  gs = createGameServer({ reconnectWindowMs: 5000, roomIdleMs: 4000, joinsPerWindow: 100000 });
   url = `ws://127.0.0.1:${await gs.listen(0)}`;
 });
 afterEach(async () => {

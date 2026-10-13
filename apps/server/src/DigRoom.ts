@@ -1,4 +1,4 @@
-import { Room, ServerError, type Client } from '@colyseus/core';
+import { Room, ServerError, matchMaker, type AuthContext, type Client } from '@colyseus/core';
 import {
   BUY_BAD, BUY_COOLDOWN, BUY_DEAD, BUY_FUNDS, BUY_MAX, BUY_OK, EV_BUY, EV_DEATH, EV_DIG, EV_HEAL, EV_RESPAWN, MSG, OF_DEAD, OF_DRILLING, OF_FACE_DOWN, OF_FACE_RIGHT, OF_INVULN, OF_THRUSTING,
   OTHER_STRIDE, SAND_CALM, SAND_FALL, SAND_HIT, SAND_LAND, SAND_WOBBLE, SIM_VERSION, SandSim, T, UPGRADE_KINDS, World,
@@ -9,6 +9,7 @@ import {
   type UpgradeKind, type WelcomeMsg, type SandEvent,
 } from '@digger/shared';
 import { serverConfig } from './config.js';
+import { TokenBucket, clientAddress, joinLimiter, tickStats } from './limits.js';
 import { HealSpawner } from './healSpawner.js';
 import { InterestIndex, chunkDiffFlat, dropSubscription, evictFarChunks, updateSubscription, type InterestState } from './interest.js';
 
@@ -29,6 +30,7 @@ export interface RoomStats {
   clamped: number; // commands whose ticks were clamped
   overflow: number; // commands dropped because the queue was full
   rateLimited: number;
+  kicked: number;
   inputTicks: number; // sim ticks consumed from commands, all players
 }
 
@@ -66,11 +68,12 @@ export class PlayerRec implements InterestState {
   readonly sandMsg = { d: this.sandBuf };
   readonly evMsg = { d: this.evBuf };
 
-  // rate limits (per second window)
-  rateWindow = 0;
-  buys = 0;
-  radars = 0;
-  pings = 0;
+  // rate limits: one token bucket per message type
+  readonly inBucket = new TokenBucket(T.net.inRate, T.net.inBurst, performance.now());
+  readonly buyBucket = new TokenBucket(T.net.buyRate, T.net.buyBurst, performance.now());
+  readonly radarBucket = new TokenBucket(T.net.radarRate, T.net.radarBurst, performance.now());
+  readonly pingBucket = new TokenBucket(T.net.pingRate, T.net.pingBurst, performance.now());
+  readonly readyBucket = new TokenBucket(0.2, T.net.readyBurst, performance.now());
   violations = 0;
   lastBuyTick = -1000;
 
@@ -85,7 +88,7 @@ export class DigRoom extends Room {
   readonly world = new World(T.SEED);
   readonly sand = new SandSim();
   readonly heal = new HealSpawner(this.world);
-  readonly stats: RoomStats = { rejected: 0, staleSeq: 0, clamped: 0, overflow: 0, rateLimited: 0, inputTicks: 0 };
+  readonly stats: RoomStats = { rejected: 0, staleSeq: 0, clamped: 0, overflow: 0, rateLimited: 0, kicked: 0, inputTicks: 0 };
   serverTick = 0;
   worldTick = 0;
   readonly players = new Map<number, PlayerRec>(); // by id, ascending insertion order
@@ -103,21 +106,27 @@ export class DigRoom extends Room {
   private readonly podScratch: PodState[] = [];
 
   override onCreate(): void {
+    if (matchMaker.stats.local.roomCount > serverConfig.maxRooms) throw new ServerError(4290, 'The server is full. Try again later.');
     this.autoDispose = false; // we dispose ourselves after roomIdleMs without players
     this.maxClients = serverConfig.maxClients;
     this.setPatchRate(null as unknown as number);
     this.idleSince = Date.now();
     this.lastPollAt = performance.now();
-    this.onMessage(MSG.READY, (c) => this.onReady(c));
-    this.onMessage(MSG.IN, (c, m: unknown) => this.onInput(c, m));
-    this.onMessage(MSG.BUY, (c, m: unknown) => this.onBuy(c, m));
-    this.onMessage(MSG.RADAR, (c) => this.onRadar(c));
-    this.onMessage(MSG.PING, (c, m: unknown) => this.onPing(c, m));
-    this.onMessage('*', (c) => {
+    // Colyseus looks handlers up in a plain object: a message type like "constructor" would hit
+    // Object.prototype and throw inside the socket callback. Use a prototype-less table.
+    const table = this as unknown as { onMessageHandlers: Record<string, unknown> };
+    table.onMessageHandlers = Object.assign(Object.create(null) as Record<string, unknown>, table.onMessageHandlers);
+    // A handler must never throw on hostile input: every handler runs inside a try/catch.
+    this.onMessage(MSG.READY, (c) => this.safe(c, () => this.onReady(c)));
+    this.onMessage(MSG.IN, (c, m: unknown) => this.safe(c, () => this.onInput(c, m)));
+    this.onMessage(MSG.BUY, (c, m: unknown) => this.safe(c, () => this.onBuy(c, m)));
+    this.onMessage(MSG.RADAR, (c) => this.safe(c, () => this.onRadar(c)));
+    this.onMessage(MSG.PING, (c, m: unknown) => this.safe(c, () => this.onPing(c, m)));
+    this.onMessage('*', (c) => this.safe(c, () => {
       this.stats.rejected++;
       const rec = this.bySession.get(c.sessionId);
       if (rec !== undefined) this.violate(rec);
-    });
+    }));
     // Fixed 30 Hz timestep driven by a fast poll: coarse OS timers (Windows rounds a 33 ms interval up to
     // ~47 ms) would otherwise slow the whole game down. Late ticks are made up for, a few at a time.
     this.setSimulationInterval(() => this.poll(), POLL_MS);
@@ -125,8 +134,11 @@ export class DigRoom extends Room {
 
   // ------------------------------------------------------------------ join / leave
 
-  override onAuth(_client: Client, options: Partial<JoinOptions> | undefined): { nick: string; token: string } {
-    const o = options ?? {};
+  override onAuth(_client: Client, options: Partial<JoinOptions> | undefined, context?: AuthContext): { nick: string; token: string } {
+    if (!joinLimiter.allow(clientAddress(context?.ip), Date.now())) {
+      throw new ServerError(4429, 'Too many joins from your address. Wait a minute and try again.');
+    }
+    const o = options !== null && typeof options === 'object' ? options : {};
     if (typeof o.token !== 'string' || !TOKEN_RE.test(o.token)) throw new ServerError(4400, 'Invalid session token.');
     const nick = sanitizeNickname(o.nickname);
     if (!nick.ok) throw new ServerError(4401, nick.error);
@@ -191,7 +203,7 @@ export class DigRoom extends Room {
 
   private onReady(client: Client): void {
     const rec = this.bySession.get(client.sessionId);
-    if (rec === undefined || rec.ready) return;
+    if (rec === undefined || this.limited(rec, rec.readyBucket) || rec.ready) return;
     const sim = rec.sim;
     const resumed = rec.everReady;
     if (resumed && sim.deadTicks <= 0 && this.podBuried(sim)) {
@@ -242,25 +254,42 @@ export class DigRoom extends Room {
 
   // ------------------------------------------------------------------ messages
 
-  private violate(rec: PlayerRec): void {
-    if (++rec.violations > T.net.maxViolations && rec.client !== null) rec.client.leave(4404, 'Too many invalid messages.');
+  private safe(client: Client, fn: () => void): void {
+    try {
+      fn();
+    } catch {
+      this.stats.rejected++;
+      const rec = this.bySession.get(client.sessionId);
+      if (rec !== undefined) this.violate(rec);
+    }
   }
 
-  private window(rec: PlayerRec): void {
-    const w = Math.floor(Date.now() / 1000);
-    if (w !== rec.rateWindow) {
-      rec.rateWindow = w;
-      rec.buys = 0;
-      rec.radars = 0;
-      rec.pings = 0;
+  // Counts an invalid or rate limited message; a client that keeps doing it is dropped.
+  private violate(rec: PlayerRec): void {
+    if (++rec.violations > T.net.maxViolations && rec.client !== null) {
+      const c = rec.client;
+      rec.client = null; // stop further handling at once
+      this.stats.kicked++;
+      this.bySession.delete(c.sessionId);
+      rec.ready = false;
+      this.removePlayer(rec);
+      c.leave(4404, 'Too many invalid messages.');
     }
+  }
+
+  private limited(rec: PlayerRec, bucket: TokenBucket): boolean {
+    if (bucket.take(performance.now())) return false;
+    this.stats.rateLimited++;
+    this.violate(rec);
+    return true;
   }
 
   private onInput(client: Client, m: unknown): void {
     const rec = this.bySession.get(client.sessionId);
     if (rec === undefined || !rec.ready) return;
+    if (this.limited(rec, rec.inBucket)) return;
     const msg = m as Partial<InMsg> | null;
-    if (msg === null || typeof msg !== 'object') { this.stats.rejected++; this.violate(rec); return; }
+    if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) { this.stats.rejected++; this.violate(rec); return; }
     const { seq, ticks, mask } = msg;
     if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0 || seq > 0x7fffffff ||
       typeof ticks !== 'number' || !Number.isFinite(ticks) ||
@@ -284,9 +313,8 @@ export class DigRoom extends Room {
   private onBuy(client: Client, m: unknown): void {
     const rec = this.bySession.get(client.sessionId);
     if (rec === undefined || !rec.ready) return;
-    this.window(rec);
-    if (++rec.buys > T.net.maxBuyPerSec) { this.stats.rateLimited++; return; }
-    const kind = (m as Partial<BuyMsg> | null)?.kind;
+    if (this.limited(rec, rec.buyBucket)) return;
+    const kind = m !== null && typeof m === 'object' ? (m as Partial<BuyMsg>).kind : undefined;
     const ki = typeof kind === 'string' ? UPGRADE_KINDS.indexOf(kind as UpgradeKind) : -1;
     if (ki < 0) {
       this.stats.rejected++;
@@ -309,8 +337,7 @@ export class DigRoom extends Room {
   private onRadar(client: Client): void {
     const rec = this.bySession.get(client.sessionId);
     if (rec === undefined || !rec.ready) return;
-    this.window(rec);
-    if (++rec.radars > T.net.maxRadarPerSec) { this.stats.rateLimited++; return; }
+    if (this.limited(rec, rec.radarBucket)) return;
     if (rec.sim.deadTicks > 0) return;
     tryRadar(rec.sim.stats);
   }
@@ -318,9 +345,8 @@ export class DigRoom extends Room {
   private onPing(client: Client, m: unknown): void {
     const rec = this.bySession.get(client.sessionId);
     if (rec === undefined) return;
-    this.window(rec);
-    if (++rec.pings > T.net.maxPingPerSec) { this.stats.rateLimited++; return; }
-    const t = (m as Partial<PingMsg> | null)?.t;
+    if (this.limited(rec, rec.pingBucket)) return;
+    const t = m !== null && typeof m === 'object' ? (m as Partial<PingMsg>).t : undefined;
     if (typeof t !== 'number' || !Number.isFinite(t)) { this.stats.rejected++; this.violate(rec); return; }
     client.send(MSG.PONG, { t });
   }
@@ -349,6 +375,12 @@ export class DigRoom extends Room {
   }
 
   private tick(): void {
+    const t0 = performance.now();
+    this.tickInner();
+    tickStats.record(performance.now() - t0);
+  }
+
+  private tickInner(): void {
     const now = Date.now();
     this.serverTick++;
     const out = this.out;
@@ -398,7 +430,8 @@ export class DigRoom extends Room {
     if (this.serverTick % T.net.leaderboardEveryTicks === 0) this.sendLeaderboard();
     if (this.serverTick % T.net.evictEveryTicks === 0) evictFarChunks(this.world, this.interest);
 
-    // 5. housekeeping: reconnect window and idle room
+    // 5. housekeeping: forgive old violations, reconnect window and idle room
+    if (this.serverTick % 30 === 0) for (const rec of this.players.values()) if (rec.violations > 0) rec.violations = Math.max(0, rec.violations - 10);
     for (const rec of this.players.values()) {
       if (rec.client === null && rec.disconnectedAt > 0 && now - rec.disconnectedAt >= serverConfig.reconnectWindowMs) {
         this.removePlayer(rec);
@@ -541,6 +574,7 @@ export class DigRoom extends Room {
       o.push(r.id, Math.round(rp.x * Q), Math.round(rp.y * Q), flags, hf);
     }
     client.send(MSG.SNAP, s);
+    tickStats.snapshotsSent++;
   }
 
   // Top 3 by highScore (ties by id) plus each player's own rank / highScore / score. Disconnected players

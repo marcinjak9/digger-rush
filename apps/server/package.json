@@ -4,12 +4,16 @@
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
-  "exports": { ".": "./src/index.ts", "./server": "./src/gameServer.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/gameServer.ts"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "build": "tsc --noEmit -p tsconfig.json",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "loadtest": "tsx scripts/loadtest.ts"
   },
   "dependencies": {
     "@colyseus/core": "0.16.24",

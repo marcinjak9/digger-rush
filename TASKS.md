@@ -6,6 +6,6 @@ Branch: web-demo/initial. Commit after each work package; checks: `npm run typec
 - [x] WP2 builder: client local mode  -> STOP and report
 - [x] WP3 server + rooms + prediction
 - [x] WP4 death/respawn, shop validation, leaderboard, heal respawn
-- [ ] WP5 abuse protection + load test
+- [x] WP5 abuse protection + load test
 - [ ] WP6 ARCH review -> REVIEW.md
 - [ ] WP7 README, Dockerfile, overview.md status

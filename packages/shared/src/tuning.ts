@@ -167,10 +167,21 @@ export const T = {
     evictEveryTicks: 300, // far unmodified chunk eviction cadence (server ticks)
     leaderboardEveryTicks: 30,
     pingEveryMs: 2000,
-    maxBuyPerSec: 10,
     buyCooldownTicks: 3, // server ticks between two purchases of one player (~100 ms)
-    maxRadarPerSec: 4,
-    maxPingPerSec: 5,
-    maxViolations: 200, // invalid messages before a client is dropped
+    maxViolations: 200, // invalid or rate limited messages before a client is dropped
+    // Token buckets per connection and message type: sustained msgs/s and burst size.
+    inRate: 40,
+    inBurst: 60,
+    buyRate: 5,
+    buyBurst: 10,
+    radarRate: 2,
+    radarBurst: 4,
+    pingRate: 2,
+    pingBurst: 6,
+    readyBurst: 2,
+    maxPayloadBytes: 1024, // websocket frames above this close the connection
+    joinsPerWindow: 10, // per address
+    joinWindowMs: 60000,
+    maxRooms: 20, // global safeguard
   },
 } as const;

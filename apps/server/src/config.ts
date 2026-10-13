@@ -6,6 +6,10 @@ export interface ServerConfig {
   roomIdleMs: number;
   maxClients: number;
   serverHz: number;
+  joinsPerWindow: number;
+  joinWindowMs: number;
+  maxRooms: number;
+  trustProxy: boolean;
 }
 
 export function defaultConfig(): ServerConfig {
@@ -14,6 +18,10 @@ export function defaultConfig(): ServerConfig {
     roomIdleMs: T.net.roomIdleMs,
     maxClients: T.net.maxClients,
     serverHz: T.net.serverHz,
+    joinsPerWindow: Number(process.env.JOIN_LIMIT ?? T.net.joinsPerWindow),
+    joinWindowMs: T.net.joinWindowMs,
+    maxRooms: Number(process.env.MAX_ROOMS ?? T.net.maxRooms),
+    trustProxy: process.env.TRUST_PROXY === '1',
   };
 }
 
